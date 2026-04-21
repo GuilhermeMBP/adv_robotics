@@ -36,7 +36,7 @@ from threading import Lock
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry, Path
-from geometry_msgs.msg import Twist, PoseStamped, Pose2D
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist, PoseStamped, Pose2D
 from rcl_interfaces.msg import ParameterDescriptor
 from rcl_interfaces.msg import ParameterType
 
@@ -53,7 +53,7 @@ MAX_ANG_VEL = radians(90)  # [rad/s]
 # Wether to use odometry (if True) or the localization pose (if False).
 # The "USE_ODOM = True" should be used only for initial tests, while you are
 # not running the localization algorithm.
-USE_ODOM = True
+USE_ODOM = False
 
 
 class BasicWaypointPathNavigation(Node):
@@ -137,7 +137,7 @@ class BasicWaypointPathNavigation(Node):
             if USE_ODOM:  # Use odometry
                 self.create_subscription(Odometry, 'odom', self.pose_cb, 1)
             else:  # Use the localization result
-                self.create_subscription(PoseStamped, 'pose', self.pose_cb, 1)
+                self.create_subscription(PoseWithCovarianceStamped, 'pose', self.pose_cb, 1)
 
 
     def pose_cb(self, msg):
@@ -157,9 +157,9 @@ class BasicWaypointPathNavigation(Node):
                 theta=utils.quaternionToYaw(msg.pose.pose.orientation))
         else:  # Get the robot pose from the PoseStamped message
             robot_pose = Pose2D(
-                x=msg.pose.position.x,
-                y=msg.pose.position.y,
-                theta=utils.quaternionToYaw(msg.pose.orientation))
+                x=msg.pose.pose.position.x,
+                y=msg.pose.pose.position.y,
+                theta=utils.quaternionToYaw(msg.pose.pose.orientation))
 
         with self.lock:
             # Get current waypoint target

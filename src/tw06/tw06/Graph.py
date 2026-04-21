@@ -110,6 +110,13 @@ class Node:
         self.actions_.append(Action(-1, 0))
         # Down
         self.actions_.append(Action(0, -1))
+        
+        # the actions left for connectivity 8
+        self.actions_.append(Action(1, 1))
+        self.actions_.append(Action(-1, 1))
+        self.actions_.append(Action(1, -1))
+        self.actions_.append(Action(-1, -1))
+
 
         # Add all actions as unborn children
         self.unborn_children_.extend(self.actions_)
@@ -144,14 +151,25 @@ class Node:
             # We have a new map point to explore in the future, this will be a
             # new child if not generated previously with lower cost
             map_point = MapPoint(x, y)
-            child_cost = self.cost_ + 1
+            # Verifica se é um movimento diagonal
+            if child_action.x != 0 and child_action.y != 0:
+                step_cost = 1.414  # Raiz quadrada de 2
+            else:
+                step_cost = 1.0    # Movimento normal (Cima/Baixo/Esq/Dir)
+                
+            child_cost = (self.cost_ + step_cost)
 
             # Check if the new position was already processed
             if (map_point.label in self.graph_.nodes_list_):
                 # In this case, ignore the previous generated node.
                 # This is OK for DEPTH_FIRST and BREADTH_FIRST. For A_STAR, it
                 # is only OK if the heuristic is admissible and consistent.
-                continue
+                #continue
+                if child_cost < self.graph_.getNode(map_point.label).cost_:
+                    # Remove the previous generated node from the graph
+                    self.graph_.removeNode(map_point.label)
+                else:
+                    continue
 
             # If we reached this far, then we have a new node
             child = Node(self.graph_, self, child_cost, self.hf_, map_point,

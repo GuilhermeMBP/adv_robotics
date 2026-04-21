@@ -29,6 +29,8 @@
 
 
 # Matrices and OpenCV related functions
+import os
+
 import numpy as np
 
 # Library packages needed
@@ -47,6 +49,9 @@ from nav_msgs.msg import Odometry, OccupancyGrid, MapMetaData
 from sensor_msgs.msg import LaserScan
 import message_filters
 from std_srvs.srv import Trigger
+
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
+
 
 # Our utility functions (using the ones from tw02)
 import ar_py_utils.utils as utils
@@ -67,8 +72,8 @@ class BasicMapping(Node):
         # TODO: These could be parameters.
         self.map_filename = 'map.png'
         self.map_resolution = 0.05  # [m/px]
-        self.map_height_meters = 6.5  # [m]
-        self.map_width_meters = 8.5  # [m]
+        self.map_height_meters = 16.0  # [m]
+        self.map_width_meters = 16.0  # [m]
         self.min_cell_value = 0  # Free space
         self.unkown_cell_value = -1  # Unkonwn space
         self.max_cell_value = 100  # Occuppied space
@@ -80,7 +85,7 @@ class BasicMapping(Node):
         self.map_origin = [-width_px/2.*self.map_resolution,  # x
                            -height_px/2.*self.map_resolution,  # y
                            0.]  # z
-
+        self.map_loaded = False  # Flag to indicate if a map was loaded from file
         # All map points are initialized with "unknown"
         # TODO: The size could be computed and updated in real-time
         self.occ_map = np.full((height_px, width_px),
@@ -108,14 +113,37 @@ class BasicMapping(Node):
         ts.registerCallback(self.odom_pose_laser_cb)
 
         # Setup publisher
+        map_qos = QoSProfile(
+            depth=1,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=QoSReliabilityPolicy.RELIABLE)
         self.occ_grid_pub = \
-            self.create_publisher(OccupancyGrid, 'map', 1)
+            self.create_publisher(OccupancyGrid, 'map', map_qos)
 
         # Run periodic callback (to publish the map)
         self.pubtimer = self.create_timer(5.0, self.timer_cb)
 
         # Provide the map save service.
         self.create_service(Trigger, 'map_save', self.map_saver_svc)
+
+        # Verifica se já existe mapa e se existir dá load
+        if os.path.exists(self.map_filename):
+            self.get_logger().info(f'Loading existing map from {self.map_filename}...')
+            # Carrega a imagem do mapa
+            loaded_map = cv2.imread(self.map_filename, cv2.IMREAD_GRAYSCALE)
+            if loaded_map is not None:
+                # A imagem é carregada com o eixo y invertido, então temos de inverter
+                loaded_map = np.flip(loaded_map, 0)
+                # Converte a imagem para o formato interno (0-100, -1 para desconhecido)
+                self.occ_map = np.full(loaded_map.shape, self.unkown_cell_value, dtype=np.int8)
+                self.occ_map[loaded_map == 254] = self.max_cell_value  # Paredes
+                self.occ_map[loaded_map == 253] = self.max_cell_value  # Zona de segurança tratada como obstáculo
+                self.occ_map[loaded_map == 128] = self.unkown_cell_value  # Desconecido
+                self.occ_map[loaded_map == 0] = self.min_cell_value  # Espaço livre
+                self.map_loaded = True
+                self.get_logger().info('Map loaded successfully!')
+            else:
+                self.get_logger().error('Failed to load the map image.')
 
     def timer_cb(self):
         with self.lock:
@@ -135,8 +163,10 @@ class BasicMapping(Node):
                                        y=self.map_origin[1],
                                        z=self.map_origin[2]),
                         orientation=Quaternion(x=0., y=0., z=0., w=1.)))
+            
             # Convert to the expected data
             occ_grid.data = self.occ_map.reshape(self.occ_map.size).tolist()
+            
             # Publish occupancy grid map
             self.occ_grid_pub.publish(occ_grid)
 
@@ -153,8 +183,8 @@ class BasicMapping(Node):
             Odometry used just to get the robot velocity.
         '''
 
-        # Do nothing if the robot is rotating
-        if abs(msg_odom.twist.twist.angular.z) > 0.001:
+        # Do nothing if the robot is rotating or the map was loaded from file (since we are not updating the map in that case)
+        if abs(msg_odom.twist.twist.angular.z) > 0.001 or self.map_loaded:
             return
 
         # Store laser position in map grid coordinates. We are assuming that
@@ -196,6 +226,20 @@ class BasicMapping(Node):
                             pt_in_world.y)/self.map_resolution)],  # Row-y
                     dtype=int)
 
+
+
+                # -------- Alteração que fiz para não dar erro do lazer medir longe de mais --------
+                # Garante que o ponto x está entre 0 e 319 (largura - 1)
+                pt_in_map[0] = np.clip(pt_in_map[0], 0, self.occ_map.shape[1] - 1)
+                # Garante que o ponto y está entre 0 e 319 (altura - 1)
+                pt_in_map[1] = np.clip(pt_in_map[1], 0, self.occ_map.shape[0] - 1)
+                # ------------------------------------------------------------------------------
+
+
+
+
+
+
                 with self.lock:
                     # Update map considering a line from the laser up the
                     # detected laser point.Note that, in numpy, we need to
@@ -232,13 +276,59 @@ class BasicMapping(Node):
     def map_saver_svc(self, request, response):
         ''' Service provided to allow saving the current map'''
         with self.lock:
+           
+           #CODIGO ORIGINAL DO PROF INICIO------------------------
             # Scale so that free space is 254, occupied is 0.
-            map_save = np.asarray(254.0*(-self.occ_map/100.0 + 1.0),
-                                  dtype=np.uint8)
+            #map_save = np.asarray(254.0*(-self.occ_map/100.0 + 1.0),
+            #                      dtype=np.uint8)
             # Unkown space is converted to 255
-            map_save[self.occ_map == self.unkown_cell_value] = 255
+           # map_save[self.occ_map == self.unkown_cell_value] = 255
             # We need to flip the map when saving it to a file.
+           # cv2.imwrite(self.map_filename, np.flip(map_save, 0))
+           #CODIGO ORIGINAL DO PROF FIM---------------------
+
+#----------------------------------------------------------------------------------------------
+            # O enunciado diz: Livre=0, Parede=254, Desconhecido=128 
+            # Primeiro, criamos uma imagem de zeros (preto = espaço livre)
+            map_save = np.zeros(self.occ_map.shape, dtype=np.uint8)
+            
+            # Definir as paredes: onde a grelha >= 65% ocupada, pomos 254 
+            map_save[self.occ_map >= 65] = 254
+            
+            # Definir desconhecido: onde a grelha é -1, pomos 128 
+            map_save[self.occ_map == self.unkown_cell_value] = 128
+
+            # 2. ESPAÇO DE CONFIGURAÇÃO (Inflação de 25cm)------------------
+            # O robô tem 25cm de raio. Com resolução de 0.05m/px, são 5 píxeis 
+            raio_px = int(0.30 / self.map_resolution)
+            
+
+            # Criamos uma máscara apenas das paredes reais
+            mask_obstaculos = np.uint8(map_save == 254)
+
+            
+            # Criamos um "pincel" circular para a dilatação
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (raio_px*2+1, raio_px*2+1))
+            
+            # Expandimos as paredes (inflação)
+            mask_dilatada = cv2.dilate(mask_obstaculos, kernel)
+
+        
+            # Pintamos a área dilatada com a cor 253 (Espaço de Configuração)
+            # Apenas onde era espaço livre ou desconhecido, para não apagar a parede 254
+            map_save[(mask_dilatada > 0) & (map_save != 254)] = 253
+
+            #DEBUG para ver o efeito da linha acima
+            #map_save[map_save == 254] = 0
+
+
+            #guardar ficheiros:
+            #We need to flip the map when saving it to a file.
             cv2.imwrite(self.map_filename, np.flip(map_save, 0))
+
+#----------------------------------------------------------------------------------------------
+
+
 
             # Now save typical map information, as shown in
             # https://index.ros.org/p/nav2_map_server/
