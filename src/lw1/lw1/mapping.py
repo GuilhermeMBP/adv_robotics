@@ -71,6 +71,7 @@ class BasicMapping(Node):
         # Map related constants
         # TODO: These could be parameters.
         self.map_filename = 'map.png'
+        self.original_map_name = 'map_original.png'
         self.map_resolution = 0.05  # [m/px]
         self.map_height_meters = 16.0  # [m]
         self.map_width_meters = 16.0  # [m]
@@ -85,7 +86,7 @@ class BasicMapping(Node):
         self.map_origin = [-width_px/2.*self.map_resolution,  # x
                            -height_px/2.*self.map_resolution,  # y
                            0.]  # z
-        self.map_loaded = False  # Flag to indicate if a map was loaded from file
+        #self.map_loaded = False  # Flag to indicate if a map was loaded from file
         # All map points are initialized with "unknown"
         # TODO: The size could be computed and updated in real-time
         self.occ_map = np.full((height_px, width_px),
@@ -127,20 +128,20 @@ class BasicMapping(Node):
         self.create_service(Trigger, 'map_save', self.map_saver_svc)
 
         # Verifica se já existe mapa e se existir dá load
-        if os.path.exists(self.map_filename):
-            self.get_logger().info(f'Loading existing map from {self.map_filename}...')
+        if os.path.exists(self.original_map_name):
+            self.get_logger().info(f'Loading existing map from {self.original_map_name}...')
             # Carrega a imagem do mapa
-            loaded_map = cv2.imread(self.map_filename, cv2.IMREAD_GRAYSCALE)
+            loaded_map = cv2.imread(self.original_map_name, cv2.IMREAD_GRAYSCALE)
             if loaded_map is not None:
                 # A imagem é carregada com o eixo y invertido, então temos de inverter
                 loaded_map = np.flip(loaded_map, 0)
                 # Converte a imagem para o formato interno (0-100, -1 para desconhecido)
                 self.occ_map = np.full(loaded_map.shape, self.unkown_cell_value, dtype=np.int8)
                 self.occ_map[loaded_map == 254] = self.max_cell_value  # Paredes
-                self.occ_map[loaded_map == 253] = self.max_cell_value  # Zona de segurança tratada como obstáculo
+                #self.occ_map[loaded_map == 253] = self.max_cell_value  # Zona de segurança tratada como obstáculo
                 self.occ_map[loaded_map == 128] = self.unkown_cell_value  # Desconecido
                 self.occ_map[loaded_map == 0] = self.min_cell_value  # Espaço livre
-                self.map_loaded = True
+                #self.map_loaded = True
                 self.get_logger().info('Map loaded successfully!')
             else:
                 self.get_logger().error('Failed to load the map image.')
@@ -184,7 +185,7 @@ class BasicMapping(Node):
         '''
 
         # Do nothing if the robot is rotating or the map was loaded from file (since we are not updating the map in that case)
-        if abs(msg_odom.twist.twist.angular.z) > 0.001 or self.map_loaded:
+        if abs(msg_odom.twist.twist.angular.z) > 0.001:
             return
 
         # Store laser position in map grid coordinates. We are assuming that
@@ -313,6 +314,8 @@ class BasicMapping(Node):
             # Expandimos as paredes (inflação)
             mask_dilatada = cv2.dilate(mask_obstaculos, kernel)
 
+            # TODO save the original map so that it can be used for future updates
+            cv2.imwrite(self.original_map_name, np.flip(map_save, 0)) 
         
             # Pintamos a área dilatada com a cor 253 (Espaço de Configuração)
             # Apenas onde era espaço livre ou desconhecido, para não apagar a parede 254
@@ -325,6 +328,8 @@ class BasicMapping(Node):
             #guardar ficheiros:
             #We need to flip the map when saving it to a file.
             cv2.imwrite(self.map_filename, np.flip(map_save, 0))
+            
+            
 
 #----------------------------------------------------------------------------------------------
 

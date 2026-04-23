@@ -224,6 +224,8 @@ class BasicWaypointPathNavigation(Node):
         vel_cmd.angular.z = ang_vel
         vel_cmd.linear.x = lin_vel
         self.vel_pub.publish(vel_cmd)
+        
+    # TODO meter a rotação do robo igual à da goal_pose
 
 
 def main(args=None):

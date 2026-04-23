@@ -48,8 +48,8 @@ from nav_msgs.msg import OccupancyGrid, Path
 
 # Our utility functions
 import ar_py_utils.utils as utils
-from tw06.Graph import Graph, MapPoint, SearchMethods
-from tw06.Graph import Node as GraphNode
+from Graph import Graph, MapPoint, SearchMethods
+from Graph import Node as GraphNode
 
 DEBUG = False
 
