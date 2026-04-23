@@ -175,14 +175,39 @@ class BasicWaypointPathNavigation(Node):
                 # If there are not more targets, stop the robot and return
                 if self.curr_target_idx == self.num_targets-1:
                     # Stop the robot
-                    vel_cmd = Twist()
-                    vel_cmd.angular.z = 0.0
-                    vel_cmd.linear.x = 0.0
-                    self.vel_pub.publish(vel_cmd)
-                    # Forget the path and return
-                    self.global_path = None
-                    self.get_logger().info('Finished path navigation')
-                    return
+                    #vel_cmd = Twist()
+                    #vel_cmd.angular.z = 0.0
+                    #vel_cmd.linear.x = 0.0
+                    #self.vel_pub.publish(vel_cmd)
+                    
+                    #Rotate the robot to match the goal orientation
+                    goal_orientation = utils.quaternionToYaw(
+                        self.global_path[self.curr_target_idx].pose.orientation)
+                    # Cálculo do ângulo entre a orientação atual do robô e a orientação desejada da meta
+                    angle_to_goal_orientation = goal_orientation - robot_pose.theta 
+                    if abs(angle_to_goal_orientation) > radians(5):
+                        # Rotate the robot
+                        kp_ang_vel = self.get_parameter(
+                            'kp_ang_vel').get_parameter_value().double_value
+                        ang_vel = kp_ang_vel * angle_to_goal_orientation
+                        ang_vel = np.clip(ang_vel, -MAX_ANG_VEL, MAX_ANG_VEL)
+                        vel_cmd = Twist()
+                        vel_cmd.angular.z = ang_vel
+                        vel_cmd.linear.x = 0.0
+                        self.vel_pub.publish(vel_cmd)
+                        return # Damos return aqui para não continuar a exceução para o próximo target (já estamos no último)
+                    else:
+                        # Stop the robot
+                        vel_cmd = Twist()
+                        vel_cmd.angular.z = 0.0
+                        vel_cmd.linear.x = 0.0
+                        self.vel_pub.publish(vel_cmd)
+                        
+                        # Forget the path and return only if we are close enough to the goal orientation, otherwise we will keep rotating until we are close enough
+                        self.global_path = None
+                        self.get_logger().info('Finished path navigation')
+                        return
+                    
                 # Else, proceed with the next target
                 self.curr_target_idx += 1
                 self.get_logger().info(

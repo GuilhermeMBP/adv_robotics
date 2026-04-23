@@ -207,8 +207,10 @@ class AStarPlanner(Node):
             # Perform the map search and, if successful, and DEBUG is active, show
             # the resulting path in the terminal output as text
             path = self.doSearch(start_pt, goal_pt)
-
+            
             if path is not None:
+                
+
                 # Show the last graph image view
                 if DEBUG:
                     self.get_logger().debug('Showing final searched map')
@@ -241,6 +243,9 @@ class AStarPlanner(Node):
                     # Add to the path
                     path_to_publish.poses.append(pose)
 
+                # Put the goal pose orientation in the last pose of the path found (this will allow us to rotate the robot in the end of the path)
+                path_to_publish.poses[-1].pose.orientation = msg_goal_pose.pose.orientation
+                
                 # Publish the path
                 self.path_pub.publish(path_to_publish)
             else:
