@@ -138,8 +138,8 @@ class BasicMapping(Node):
                 # Converte a imagem para o formato interno (0-100, -1 para desconhecido)
                 self.occ_map = np.full(loaded_map.shape, self.unkown_cell_value, dtype=np.int8)
                 self.occ_map[loaded_map == 254] = self.max_cell_value  # Paredes
-                #self.occ_map[loaded_map == 253] = self.max_cell_value  # Zona de segurança tratada como obstáculo
-                self.occ_map[loaded_map == 128] = self.unkown_cell_value  # Desconecido
+                #self.occ_map[loaded_map == 253] = self.max_cell_value  # Espaço de config tratado como obstáculo
+                self.occ_map[loaded_map == 128] = self.unkown_cell_value  # Desconhecido
                 self.occ_map[loaded_map == 0] = self.min_cell_value  # Espaço livre
                 #self.map_loaded = True
                 self.get_logger().info('Map loaded successfully!')
@@ -343,7 +343,7 @@ class BasicMapping(Node):
                     image=self.map_filename,
                     resolution=self.map_resolution,
                     origin=self.map_origin,
-                    negate=0,
+                    negate=1, # o mapa está a ser guardado no formato invertido ao standard do nav2
                     occupied_thresh=0.65,  # >= 0.65 => occupied
                     free_thresh=0.35,  # <= 0.35 => free
                 )
