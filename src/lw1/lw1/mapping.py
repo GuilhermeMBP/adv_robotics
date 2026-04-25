@@ -184,7 +184,7 @@ class BasicMapping(Node):
             Odometry used just to get the robot velocity.
         '''
 
-        # Do nothing if the robot is rotating or the map was loaded from file (since we are not updating the map in that case)
+        # Do nothing if the robot is rotating
         if abs(msg_odom.twist.twist.angular.z) > 0.001:
             return
 
@@ -314,7 +314,7 @@ class BasicMapping(Node):
             # Expandimos as paredes (inflação)
             mask_dilatada = cv2.dilate(mask_obstaculos, kernel)
 
-            # TODO save the original map so that it can be used for future updates
+            # save the original map so that it can be used for future updates
             cv2.imwrite(self.original_map_name, np.flip(map_save, 0)) 
         
             # Pintamos a área dilatada com a cor 253 (Espaço de Configuração)

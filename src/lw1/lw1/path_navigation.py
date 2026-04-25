@@ -244,14 +244,13 @@ class BasicWaypointPathNavigation(Node):
         lin_vel = np.clip(lin_vel, -MAX_LIN_VEL, MAX_LIN_VEL)
         ang_vel = np.clip(ang_vel, -MAX_ANG_VEL, MAX_ANG_VEL)
 
+        #TODO fazer um filtro passa baixo para a velocidade angular, para evitar oscilações
+
         # Send velocity commands
         vel_cmd = Twist()
         vel_cmd.angular.z = ang_vel
         vel_cmd.linear.x = lin_vel
         self.vel_pub.publish(vel_cmd)
-        
-    # TODO meter a rotação do robo igual à da goal_pose
-
 
 def main(args=None):
     '''

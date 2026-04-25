@@ -114,6 +114,8 @@ class AStarPlanner(Node):
 
         # Costmap as occupancyGrid (for RViz)
         self.occ_grid_pub = self.create_publisher(OccupancyGrid, 'occgrid', 1)
+        
+        # TODO Publicar o costmap
 
         # Path publisher
         self.path_pub = self.create_publisher(Path, 'path', 1)
