@@ -28,17 +28,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 
-'''@package docstring
+"""Executes a simple task using YASMIN.
+
 Execute a simple task, formed by the following sequential execution:
   - Action Move2Pos to position (0, -2) [m]
   - Action Rotate2Angle to orientation -90 deg
   - Action Stop
   - Action Recharge to 90%
   Use yasmin to implement the FSM: https://github.com/uleroboticsgroup/yasmin
-'''
+"""
 
 # ROS API
 from geometry_msgs.msg import Point
+from sensor_msgs.msg import BatteryState
 import rclpy
 
 # Yasmin FSM execution
@@ -47,40 +49,43 @@ from yasmin import Blackboard
 from yasmin import State
 from yasmin import StateMachine
 from yasmin_ros import ActionState, set_ros_loggers
+from yasmin_ros.yasmin_node import YasminNode
 from yasmin_ros.basic_outcomes import ABORT, CANCEL, SUCCEED
 from yasmin_viewer import YasminViewerPub
 
 # Our libraries and functions
 from ar_utils import action
-import tw10.myglobals as myglobals
+import lw2.myglobals as myglobals
 
 
-class SuccessState(State):
-    """Represents the success state."""
+class RobotBlackboardSynchronizer:
+    """Map between relevant topics and the blackboard."""
 
-    def __init__(self) -> None:
-        # List of possible outcomes
-        super().__init__([SUCCEED])
+    def __init__(self, yasmin_node, blackboard):
+        """Store YASMIN relevant objects and subscribe relevant topics."""
+        self.node = yasmin_node
+        self.blackboard = blackboard
+        self.battery_state_subscriber = self.node.create_subscription(
+            BatteryState, 'battery/state', self.battery_level_callback, 4)
 
-    def execute(self, blackboard: Blackboard) -> str:
-        # We are simply returning a fixed outcome, but the idea is to run
-        # the code corresponding to this state and, depending how thing run,
-        # return the corresponding outcome
-        return SUCCEED
+    def battery_level_callback(self, msg: BatteryState):
+        """Store the battery level in the blackboard."""
+        self.blackboard['battery_level'] = msg.percentage
 
 
 class FailureState(State):
-    """Represents the failure state."""
+    """Represents the FAILURE state."""
 
     def __init__(self) -> None:
-        # List of possible outcomes
-        super().__init__(['failure'])
+        """Initialize with list of possible outcomes."""
+        super().__init__(['failed'])
 
-    def execute(self, blackboard: Blackboard) -> str:
+    def execute(self, _blackboard: Blackboard) -> str:
+        """Execute the state and return the corresponding outcome."""
         # We are simply returning a fixed outcome, but the idea is to run
         # the code corresponding to this state and, depending how thing run,
         # return the corresponding outcome
-        return 'failure'
+        return 'failed'
 
 
 def main(args=None):
@@ -95,21 +100,62 @@ def main(args=None):
     # Set ROS 2 logs
     set_ros_loggers()
 
+    # Get YASMIN node instance
+    yasmin_node = YasminNode.get_instance()
+
     # Create a finite state machine (FSM)
-    sm = StateMachine(outcomes=["success", "failure"])
+    sm = StateMachine(outcomes=['failed'])
 
     # Create the blackboard
     blackboard = Blackboard()
     # Initialize the message to be spoken as an empty string
     blackboard['message2speak'] = ''
+    # Initialize the stored battery level to 1.0 (100%)
+    blackboard['battery_level'] = 1.0
 
     #
     # Add each state to the FSM
     #
 
     #############################################################
+    # StandBy state
+    def create_goal_cb_standby(_blackboard: Blackboard):
+        # Create the desired goal
+        goal = action.Stop.Goal()
+        return goal
+
+    def result_handler_cb_standby(blackboard: Blackboard,
+                                  response: action.Stop.Result):
+        # Print the result
+        yasmin.YASMIN_LOG_INFO(
+            'Action Stop in StandBy state finished with robot stopped: '
+            + str(response.is_stopped)
+        )
+        if blackboard['battery_level'] < myglobals.MIN_POWER_LEVEL:
+            # If battery level is low, proceed to recharge
+            return 'low_battery'
+        else:
+            return SUCCEED
+    sm.add_state(
+        'STANDBY',
+        ActionState(
+            action_type=action.Stop,
+            action_name='ActionStop',
+            create_goal_handler=create_goal_cb_standby,
+            outcomes=[ABORT, CANCEL, SUCCEED, 'low_battery'],
+            result_handler=result_handler_cb_standby
+        ),
+        transitions={
+            'low_battery': 'MOTION',  # Proceed to motion state (to recharge)
+            SUCCEED: 'STANDBY',  # Loop back to stop state
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    #############################################################
     # Motion state
-    def create_goal_cb_motion(blackboard: Blackboard):
+    def create_goal_cb_motion(_blackboard: Blackboard):
         # Create the desired goal
         goal = action.Move2Pos.Goal(target_position=Point(
             x=myglobals.recharge_targets_wpose.x,
@@ -117,11 +163,11 @@ def main(args=None):
             z=0.0))
         return goal
 
-    def response_handler_cb_motion(blackboard: Blackboard,
-                                   response: action.Move2Pos.Result):
+    def result_handler_cb_motion(_blackboard: Blackboard,
+                                 response: action.Move2Pos.Result):
         # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Move2Pos finished at: ' +
-                               response.final_pose.__str__())
+        yasmin.YASMIN_LOG_INFO('Action Move2Pos finished at: '
+                               + str(response.final_pose))
         return SUCCEED
     sm.add_state(
         'MOTION',
@@ -130,7 +176,7 @@ def main(args=None):
             action_name='ActionMove2Pos',
             create_goal_handler=create_goal_cb_motion,
             outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=response_handler_cb_motion
+            result_handler=result_handler_cb_motion
         ),
         transitions={
             SUCCEED: 'ROTATION',
@@ -141,17 +187,17 @@ def main(args=None):
 
     #############################################################
     # Rotation state
-    def create_goal_cb_rotation(blackboard: Blackboard):
+    def create_goal_cb_rotation(_blackboard: Blackboard):
         # Create the desired goal
         goal = action.Rotate2Angle.Goal(
             target_orientation=myglobals.recharge_targets_wpose.theta)
         return goal
 
-    def feedback_handler_cb_rotation(blackboard: Blackboard,
-                                     response: action.Rotate2Angle.Result):
+    def result_handler_cb_rotation(_blackboard: Blackboard,
+                                   response: action.Rotate2Angle.Result):
         # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Rotate2Angle finished at: ' +
-                               response.final_orientation.__str__())
+        yasmin.YASMIN_LOG_INFO('Action Rotate2Angle finished at: '
+                               + str(response.final_orientation))
         return SUCCEED
     sm.add_state(
         'ROTATION',
@@ -160,7 +206,7 @@ def main(args=None):
             action_name='ActionRotate2Angle',
             create_goal_handler=create_goal_cb_rotation,
             outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=feedback_handler_cb_rotation
+            result_handler=result_handler_cb_rotation
         ),
         transitions={
             SUCCEED: 'STOP',
@@ -171,16 +217,16 @@ def main(args=None):
 
     #############################################################
     # Stop state
-    def create_goal_cb_stop(blackboard: Blackboard):
+    def create_goal_cb_stop(_blackboard: Blackboard):
         # Create the desired goal
         goal = action.Stop.Goal()
         return goal
 
-    def feedback_handler_cb_stop(blackboard: Blackboard,
-                                 response: action.Stop.Result):
+    def result_handler_cb_stop(_blackboard: Blackboard,
+                               response: action.Stop.Result):
         # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Stop finished with robot stopped: ' +
-                               str(response.is_stopped))
+        yasmin.YASMIN_LOG_INFO('Action Stop finished with robot stopped: '
+                               + str(response.is_stopped))
         return SUCCEED
     sm.add_state(
         'STOP',
@@ -189,39 +235,39 @@ def main(args=None):
             action_name='ActionStop',
             create_goal_handler=create_goal_cb_stop,
             outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=feedback_handler_cb_stop
+            result_handler=result_handler_cb_stop
         ),
         transitions={
-            SUCCEED: 'RECHARGING',
+            SUCCEED: 'RECHARGE',  # Loop back to stop state
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
     )
 
     #############################################################
-    # Recharging state
-    def create_goal_cb_recharging(blackboard: Blackboard):
+    # Recharge state
+    def create_goal_cb_recharge(_blackboard: Blackboard):
         # Create the desired goal
         goal = action.Recharge.Goal(target_battery_level=1.0)
         return goal
 
-    def feedback_handler_cb_recharging(blackboard: Blackboard,
-                                       response: action.Recharge.Result):
+    def result_handler_cb_recharge(_blackboard: Blackboard,
+                                   response: action.Recharge.Result):
         # Store the message with the battery level in the blackboard
         blackboard['message2speak'] = \
-            f'Battery recharged up to {response.battery_level*100:.0f}%'
+            f'Battery recharged up to {response.battery_level * 100:.0f}%'
         # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Recharging finished with battery at: ' +
-                               f'{response.battery_level*100:.0f}%')
+        yasmin.YASMIN_LOG_INFO('Action Recharge finished with battery at: '
+                               + f'{response.battery_level * 100:.0f}%')
         return SUCCEED
     sm.add_state(
-        'RECHARGING',
+        'RECHARGE',
         ActionState(
             action_type=action.Recharge,
             action_name='ActionRecharge',
-            create_goal_handler=create_goal_cb_recharging,
+            create_goal_handler=create_goal_cb_recharge,
             outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=feedback_handler_cb_recharging
+            result_handler=result_handler_cb_recharge
         ),
         transitions={
             SUCCEED: 'SPEAK',
@@ -237,11 +283,11 @@ def main(args=None):
         goal = action.SpeakText.Goal(text_to_speak=blackboard['message2speak'])
         return goal
 
-    def feedback_handler_cb_speak(blackboard: Blackboard,
-                                  response: action.SpeakText.Result):
+    def result_handler_cb_speak(_blackboard: Blackboard,
+                                response: action.SpeakText.Result):
         # Print the result
-        yasmin.YASMIN_LOG_INFO('Action SpeakText succeeded: ' +
-                               str(response.text_spoken))
+        yasmin.YASMIN_LOG_INFO('Action SpeakText succeeded: '
+                               + str(response.text_spoken))
         return SUCCEED
     sm.add_state(
         'SPEAK',
@@ -250,22 +296,12 @@ def main(args=None):
             action_name='ActionSpeakText',
             create_goal_handler=create_goal_cb_speak,
             outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=feedback_handler_cb_speak
+            result_handler=result_handler_cb_speak
         ),
         transitions={
-            SUCCEED: 'SUCCESS',
+            SUCCEED: 'STANDBY',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
-        },
-    )
-
-    #############################################################
-    # Success state
-    sm.add_state(
-        'SUCCESS',
-        SuccessState(),
-        transitions={
-            SUCCEED: 'success'
         },
     )
 
@@ -275,12 +311,16 @@ def main(args=None):
         'FAILURE',
         FailureState(),
         transitions={
-            'failure': 'failure'
+            'failed': 'failed'
         },
     )
 
     # Publish FSM information for visualization
-    YasminViewerPub('TW10_YASMIN', sm)
+    YasminViewerPub(sm, 'TW10_YASMIN')
+
+    #############################################################
+    # Get our robot state to backboard synchronizer
+    RobotBlackboardSynchronizer(yasmin_node, blackboard)
 
     #############################################################
     # Execute the FSM

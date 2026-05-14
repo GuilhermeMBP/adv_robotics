@@ -27,15 +27,16 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-'''@package docstring
+"""Rotate2AngleActionServer.
+
 Implementation of the Rotate2Angle action: given a orientation goal, rotate
 the robot until that orientation is reached.
-'''
+"""
 
 # Non-ROS modules
 from math import radians
 import os
-from threading import Lock, Event
+from threading import Event, Lock
 import functools
 
 # ROS related modules
@@ -44,11 +45,11 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 
 # Our modules
 from ar_utils.action import Rotate2Angle
-from ar_py_utils.utils import quaternionToYaw, clipValue
+from ar_py_utils.utils import clipValue, quaternionToYaw
 
 
 # This action name (strip the '.py' preffix)
@@ -56,11 +57,17 @@ ACTION_NAME = os.path.basename(__file__)[:-3]
 
 
 class Rotate2AngleActionServer(Node):
-    '''
-        Given a desired orientation, rotate the robot until that orientation is
-        reached
-    '''
+    """Rotate2AngleActionServer.
+
+    Given a desired orientation, rotate the robot until that orientation is
+    reached.
+    """
+
+    # Robot navigation/motion related constants and variables
+    MAX_ANG_VEL = 1.57  # Maximu angular speed (90°/s) [rad/s]
+
     def __init__(self):
+        """Constructor."""
         super().__init__('action_rotate2angle')
 
         # Create condition to manage access to the goal variable, wich will be
@@ -68,17 +75,14 @@ class Rotate2AngleActionServer(Node):
         self.goal_handle = None
         self.goal_lock = Lock()
 
-        ''' Initialize members for navigation control '''
+        """ Initialize members for navigation control """
         self.curr_orientation = 0.0  # Hold the last/current robot orientation
 
-        # Robot navigation/motion related constants and variables
-        self.MAX_ANG_VEL = 1.57  # Maximu angular speed (90°/s) [rad/s]
-
         # Navigation variables
-        self.Kp_ang_vel = 3.0  # Proportional gain for the angular vel. control
+        self.kp_ang_vel = 3.0  # Proportional gain for the angular vel. control
         self.max_angle_error = radians(5.0)  # Maximum angle error
 
-        ''' ROS related code '''
+        # ROS related code
         # Setup publisher for velocity commands
         self.vel_pub = self.create_publisher(
             Twist, 'cmd_vel', 1)
@@ -97,18 +101,17 @@ class Rotate2AngleActionServer(Node):
             callback_group=ReentrantCallbackGroup())
 
     def destroy(self):
-        ''' Destructor '''
+        """Destructor."""
         self.action_server.destroy()
         super().destroy_node()
 
     def goal_cb(self, goal_request):
-        '''This function is called when a new goal is requested. Currently it
-        always accept a new goal.'''
+        """Called when a new goal is requested. Currently it always accept a new goal."""
         self.get_logger().info(f'{ACTION_NAME} received new goal request:')
         return GoalResponse.ACCEPT
 
     def handle_accepted_cb(self, goal_handle):
-        ''' This function runs whenever a new goal is accepted.'''
+        """This function runs whenever a new goal is accepted."""
         with self.goal_lock:
             # This server only allows one goal at a time
             if (self.goal_handle is not None) and (self.goal_handle.is_active):
@@ -120,16 +123,16 @@ class Rotate2AngleActionServer(Node):
         goal_handle.execute()
 
     def cancel_cb(self, goal_handle):
-        ''' Callback to call when the action is cancelled '''
+        """Callback to call when the action is cancelled."""
         self.get_logger().info(f'{ACTION_NAME} was cancelled!')
         # The cancel request was accepted
         return CancelResponse.ACCEPT
 
     def execute_cb(self, goal_handle):
-        ''' Callback to call when the action as a new goal '''
+        """Callback to call when the action as a new goal."""
         self.get_logger().info(
-            f'Executing action {ACTION_NAME} with goal angle ' +
-            f'{goal_handle.request.target_orientation:.2f} [°].')
+            f'Executing action {ACTION_NAME} with goal angle '
+            + f'{goal_handle.request.target_orientation:.2f} [°].')
 
         # Wait for a confimation (trigger), either due to the goal having
         # succeeded, or the goal having been cancelled.
@@ -140,13 +143,13 @@ class Rotate2AngleActionServer(Node):
         with self.goal_lock:
             if self.sub_pose is None:
                 self.sub_pose = self.create_subscription(
-                        PoseWithCovarianceStamped,
-                        'pose',
-                        functools.partial(self.robotPoseCallback,
-                                          goal_handle=goal_handle,
-                                          trigger_event=trigger_event),
-                        1,
-                        callback_group=ReentrantCallbackGroup())
+                    PoseWithCovarianceStamped,
+                    'pose',
+                    functools.partial(self.robot_pose_callback,
+                                      goal_handle=goal_handle,
+                                      trigger_event=trigger_event),
+                    1,
+                    callback_group=ReentrantCallbackGroup())
 
         # Get the desired orientation
         target_orientation = goal_handle.request.target_orientation
@@ -161,13 +164,13 @@ class Rotate2AngleActionServer(Node):
                 with self.goal_lock:
                     if self.sub_pose is None:
                         self.sub_pose = self.create_subscription(
-                                PoseWithCovarianceStamped,
-                                'pose',
-                                functools.partial(self.robotPoseCallback,
-                                                  goal_handle=goal_handle,
-                                                  trigger_event=trigger_event),
-                                1,
-                                callback_group=ReentrantCallbackGroup())
+                            PoseWithCovarianceStamped,
+                            'pose',
+                            functools.partial(self.robot_pose_callback,
+                                              goal_handle=goal_handle,
+                                              trigger_event=trigger_event),
+                            1,
+                            callback_group=ReentrantCallbackGroup())
             else:
                 # If the event was triggered, clear it
                 trigger_event.clear()
@@ -190,8 +193,8 @@ class Rotate2AngleActionServer(Node):
                         final_orientation=self.curr_orientation)
 
                 # Use a P controller based on the desired and current angles
-                error = (target_orientation - self.curr_orientation)
-                ang_vel = self.Kp_ang_vel * error
+                error = target_orientation - self.curr_orientation
+                ang_vel = self.kp_ang_vel * error
                 ang_vel = clipValue(ang_vel, -self.MAX_ANG_VEL,
                                     self.MAX_ANG_VEL)
 
@@ -221,12 +224,9 @@ class Rotate2AngleActionServer(Node):
                 feedback.base_orientation = self.curr_orientation
                 goal_handle.publish_feedback(feedback)
 
-    def robotPoseCallback(self, msg: PoseWithCovarianceStamped, goal_handle,
-                          trigger_event):
-        '''
-        Receive current robot pose and change its velocity according to the
-        orientation
-        '''
+    def robot_pose_callback(self, msg: PoseWithCovarianceStamped, goal_handle,
+                            trigger_event):
+        """Receive current robot pose and change its velocity according to the orientation."""
         with self.goal_lock:
             # If the action is not active or a cancel was requested,
             # return immediately
@@ -243,8 +243,7 @@ class Rotate2AngleActionServer(Node):
 
 
 def main(args=None):
-    ''' Main function - start the action server.
-    '''
+    """Main function - start the action server."""
     rclpy.init(args=args)
     rotate2angle_action_server = Rotate2AngleActionServer()
 

@@ -29,13 +29,14 @@
 #
 # Revision $Id$
 
-'''@package docstring
-Stop action: stop the robot.
-'''
+"""Stop action.
+
+Stop the robot.
+"""
 
 # Non-ROS modules
 import os
-from threading import Lock, Event
+from threading import Event, Lock
 from numpy import sqrt
 import functools
 
@@ -57,10 +58,13 @@ ACTION_NAME = os.path.basename(__file__)[:-3]
 
 
 class StopActionServer(Node):
-    '''
-        Stop the robot motion.
-    '''
+    """StopActionServer.
+
+    Stop the robot motion.
+    """
+
     def __init__(self):
+        """Constructor."""
         super().__init__('action_stop')
 
         # Create condition to manage access to the goal variable, wich will be
@@ -88,18 +92,21 @@ class StopActionServer(Node):
             callback_group=ReentrantCallbackGroup())
 
     def destroy(self):
-        ''' Destructor '''
+        """Destructor."""
         self.action_server.destroy()
         super().destroy_node()
 
     def goal_cb(self, goal_request):
-        '''This function is called when a new goal is requested. Currently it
-        always accept a new goal.'''
+        """Goal callback.
+
+        This function is called when a new goal is requested. Currently it
+        always accept a new goal.
+        """
         self.get_logger().info(f'{ACTION_NAME} received new goal request:')
         return GoalResponse.ACCEPT
 
     def handle_accepted_cb(self, goal_handle):
-        ''' This function runs whenever a new goal is accepted.'''
+        """This function runs whenever a new goal is accepted."""
         with self.goal_lock:
             # This server only allows one goal at a time
             if (self.goal_handle is not None) and (self.goal_handle.is_active):
@@ -111,13 +118,13 @@ class StopActionServer(Node):
         goal_handle.execute()
 
     def cancel_cb(self, goal_handle):
-        ''' Callback to call when the action is cancelled '''
+        """Callback to call when the action is cancelled."""
         self.get_logger().info(f'{ACTION_NAME} was cancelled!')
         # Change the action status to cancelled
         return CancelResponse.ACCEPT
 
     def execute_cb(self, goal_handle):
-        ''' Callback to call when the action as a new goal '''
+        """Callback to call when the action as a new goal."""
         self.get_logger().info(f'Executing action {ACTION_NAME}')
 
         # Wait for a confimation (trigger), either due to the goal having
@@ -130,7 +137,7 @@ class StopActionServer(Node):
                 self.sub_odom = self.create_subscription(
                     Odometry,
                     'odom',
-                    functools.partial(self.robotOdomCallback,
+                    functools.partial(self.robot_odom_callback,
                                       goal_handle=goal_handle,
                                       trigger_event=trigger_event),
                     1,
@@ -147,7 +154,7 @@ class StopActionServer(Node):
                         self.sub_odom = self.create_subscription(
                             Odometry,
                             'odom',
-                            functools.partial(self.robotOdomCallback,
+                            functools.partial(self.robot_odom_callback,
                                               goal_handle=goal_handle,
                                               trigger_event=trigger_event),
                             1,
@@ -175,8 +182,8 @@ class StopActionServer(Node):
                     return Stop.Result(is_stopped=False)
 
                 # Check if the robot is moving
-                lin_speed = sqrt(self.curr_odom.twist.twist.linear.x**2 +
-                                 self.curr_odom.twist.twist.linear.y**2)
+                lin_speed = sqrt(self.curr_odom.twist.twist.linear.x**2
+                                 + self.curr_odom.twist.twist.linear.y**2)
                 if (lin_speed > 0.001) or \
                    (self.curr_odom.twist.twist.angular.z > 0.002):
                     # Ask the robot to stop
@@ -192,10 +199,8 @@ class StopActionServer(Node):
                     self.get_logger().info(f'{ACTION_NAME} has succeeded!')
                     return Stop.Result(is_stopped=True)
 
-    def robotOdomCallback(self, msg: Odometry, goal_handle, trigger_event):
-        '''
-        Check current velocity and, if the robot is not stopped, stop it.
-        '''
+    def robot_odom_callback(self, msg: Odometry, goal_handle, trigger_event):
+        """Check current velocity and, if the robot is not stopped, stop it."""
         with self.goal_lock:
             # If the goal is not active, there is nothing to do here
             if not goal_handle.is_active:
@@ -211,8 +216,7 @@ class StopActionServer(Node):
 
 
 def main(args=None):
-    ''' Main function - start the action server.
-    '''
+    """Main function - start the action server."""
     rclpy.init(args=args)
     stop_action_server = StopActionServer()
 
