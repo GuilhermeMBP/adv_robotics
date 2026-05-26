@@ -29,9 +29,10 @@
 #
 # Revision $Id$
 
-'''@package docstring
-Text speak action: speak a given text.
-'''
+"""Text speak action.
+
+Speak a given text.
+"""
 
 # ROS related modules
 import rclpy
@@ -41,7 +42,6 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 # Our modules
-import tw10.myglobals as myglobals
 from ar_utils.action import SpeakText
 from ar_py_utils.utils import speak_text, stop_all_speaches
 
@@ -55,10 +55,13 @@ ACTION_NAME = os.path.basename(__file__)[:-3]
 
 
 class SpeakTextActionServer(Node):
-    '''
-        Speak a given text.
-    '''
+    """SpeakTextActionServer.
+
+    Speak a given text.
+    """
+
     def __init__(self):
+        """Constructor."""
         super().__init__('action_speak_text')
 
         # Create condition to manage access to the goal variable, wich will be
@@ -78,18 +81,21 @@ class SpeakTextActionServer(Node):
             callback_group=ReentrantCallbackGroup())
 
     def destroy(self):
-        ''' Destructor '''
+        """Destructor."""
         self.action_server.destroy()
         super().destroy_node()
 
     def goal_cb(self, goal_request):
-        '''This function is called when a new goal is requested. Currently it
-        always accept a new goal.'''
+        """Goal callback.
+
+        This function is called when a new goal is requested. Currently it
+        always accept a new goal.
+        """
         self.get_logger().info(f'{ACTION_NAME} received new goal request:')
         return GoalResponse.ACCEPT
 
     def handle_accepted_cb(self, goal_handle):
-        ''' This function runs whenever a new goal is accepted.'''
+        """This function runs whenever a new goal is accepted."""
         with self.goal_lock:
             # This server only allows one goal at a time
             if (self.goal_handle is not None) and (self.goal_handle.is_active):
@@ -102,7 +108,7 @@ class SpeakTextActionServer(Node):
         goal_handle.execute()
 
     def cancel_cb(self, goal_handle):
-        ''' Callback to call when the action is cancelled '''
+        """Callback to call when the action is cancelled."""
         self.get_logger().info(f'{ACTION_NAME} was cancelled!')
         # Update internal information
         with self.goal_lock:
@@ -111,9 +117,9 @@ class SpeakTextActionServer(Node):
         return CancelResponse.ACCEPT
 
     def execute_cb(self, goal_handle):
-        ''' Callback to call when the action as a new goal '''
-        self.get_logger().info(f'Executing action {ACTION_NAME} with ' +
-                               f'file {self.goal_handle.request.text_to_speak}')
+        """Callback to call when the action as a new goal."""
+        self.get_logger().info(f'Executing action {ACTION_NAME} with '
+                               + f'file {self.goal_handle.request.text_to_speak}')
 
         # Speak text
         with self.goal_lock:
@@ -134,8 +140,7 @@ class SpeakTextActionServer(Node):
 
 
 def main(args=None):
-    ''' Main function - start the action server.
-    '''
+    """Main function - start the action server."""
     rclpy.init(args=args)
     speak_text_action_server = SpeakTextActionServer()
 

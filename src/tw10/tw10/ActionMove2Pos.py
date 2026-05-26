@@ -27,14 +27,15 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-'''@package docstring
-Move2Pos action: given a 2D position (X and Y), move to that position.
-'''
+"""Move2Pos action.
+
+Given a 2D position (X and Y), move to that position.
+"""
 
 # Non-ROS modules
-from math import radians, atan2, sqrt
+from math import atan2, radians, sqrt
 import os
-from threading import Lock, Event
+from threading import Event, Lock
 import functools
 
 # ROS related modules
@@ -43,11 +44,11 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
-from geometry_msgs.msg import Pose2D, Twist, PoseWithCovarianceStamped
+from geometry_msgs.msg import Pose2D, PoseWithCovarianceStamped, Twist
 
 # Our modules
 from ar_utils.action import Move2Pos
-from ar_py_utils.utils import quaternionToYaw, clipValue
+from ar_py_utils.utils import clipValue, quaternionToYaw
 import ar_py_utils.LocalFrameWorldFrameTransformations as lfwft
 
 # This action name (strip the '.py' preffix)
@@ -55,11 +56,18 @@ ACTION_NAME = os.path.basename(__file__)[:-3]
 
 
 class Move2PosActionServer(Node):
-    '''
-        Given a position goal, move the robot until that position is
-        reached, independently of the orientation.
-    '''
+    """Move2PosActionServer.
+
+    Given a position goal, move the robot until that position is
+    reached, independently of the orientation.
+    """
+
+    # Robot navigation/motion related constants
+    MAX_LIN_VEL = 1.0  # Maximum linear speed [m/s]
+    MAX_ANG_VEL = 1.57  # Maximu angular speed (90°/s) [rad/s]
+
     def __init__(self):
+        """Constructor."""
         super().__init__('action_move2pos')
 
         # Create condition to manage access to the goal variable, wich will be
@@ -67,21 +75,17 @@ class Move2PosActionServer(Node):
         self.goal_handle = None
         self.goal_lock = Lock()
 
-        ''' Initialize members for navigation control '''
+        """ Initialize members for navigation control """
         self.curr_pose = Pose2D()
 
-        # Robot navigation/motion related constants and variables
-        self.MAX_LIN_VEL = 1.0  # Maximum linear speed [m/s]
-        self.MAX_ANG_VEL = 1.57  # Maximu angular speed (90°/s) [rad/s]
-
         # Navigation variables
-        self.Kp_lin_vel = 1.0  # Proportional gain for the linear vel. control
-        self.Kp_ang_vel = 3.0  # Propostional gain for the angular vel. control
+        self.kp_lin_vel = 0.5  # Proportional gain for the linear vel. control
+        self.kp_ang_vel = 0.5  # Proportional gain for the angular vel. control
         self.min_distance = 0.1  # Minimum accepted distance to target [m]
         self.max_angle_to_target = radians(30.0)
         self.velocity_at_target = 0.0
 
-        ''' ROS related code '''
+        """ ROS related code """
         self.vel_cmd = Twist()  # Velocity commands
 
         # Setup publisher for velocity commands
@@ -102,18 +106,21 @@ class Move2PosActionServer(Node):
             callback_group=ReentrantCallbackGroup())
 
     def destroy(self):
-        ''' Destructor '''
+        """Destructor."""
         self.action_server.destroy()
         super().destroy_node()
 
     def goal_cb(self, goal_request):
-        '''This function is called when a new goal is requested. Currently it
-        always accept a new goal.'''
+        """Goal callback.
+
+        This function is called when a new goal is requested. Currently it
+        always accept a new goal.
+        """
         self.get_logger().info(f'{ACTION_NAME} received new goal request')
         return GoalResponse.ACCEPT
 
     def handle_accepted_cb(self, goal_handle):
-        ''' This function runs whenever a new goal is accepted.'''
+        """This function runs whenever a new goal is accepted."""
         with self.goal_lock:
             # This server only allows one goal at a time
             if (self.goal_handle is not None) and (self.goal_handle.is_active):
@@ -125,17 +132,17 @@ class Move2PosActionServer(Node):
         goal_handle.execute()
 
     def cancel_cb(self, goal_handle):
-        ''' Callback that's called when an action cancellation is requested '''
+        """Callback that's called when an action cancellation is requested."""
         self.get_logger().info(f'{ACTION_NAME} received a cancel request!')
         # The cancel request was accepted
         return CancelResponse.ACCEPT
 
     def execute_cb(self, goal_handle):
-        ''' Callback to execute when the action has a new goal '''
+        """Callback to execute when the action has a new goal."""
         self.get_logger().info(
-            f'Executing action {ACTION_NAME} with goal position ' +
-            f'[{goal_handle.request.target_position.x:0.2f},' +
-            f' {goal_handle.request.target_position.y:0.2f}]. [m]')
+            f'Executing action {ACTION_NAME} with goal position '
+            + f'[{goal_handle.request.target_position.x:0.2f},'
+            + f' {goal_handle.request.target_position.y:0.2f}]. [m]')
 
         # Wait for a confimation (trigger), either due to the goal having
         # succeeded, or the goal having been cancelled.
@@ -146,13 +153,13 @@ class Move2PosActionServer(Node):
         with self.goal_lock:
             if self.sub_pose is None:
                 self.sub_pose = self.create_subscription(
-                        PoseWithCovarianceStamped,
-                        'pose',
-                        functools.partial(self.robotPoseCallback,
-                                          goal_handle=goal_handle,
-                                          trigger_event=trigger_event),
-                        1,
-                        callback_group=ReentrantCallbackGroup())
+                    PoseWithCovarianceStamped,
+                    'pose',
+                    functools.partial(self.robot_pose_callback,
+                                      goal_handle=goal_handle,
+                                      trigger_event=trigger_event),
+                    1,
+                    callback_group=ReentrantCallbackGroup())
 
         # Desired position
         target_position = lfwft.Point2D(
@@ -169,13 +176,13 @@ class Move2PosActionServer(Node):
                 with self.goal_lock:
                     if self.sub_pose is None:
                         self.sub_pose = self.create_subscription(
-                                PoseWithCovarianceStamped,
-                                'pose',
-                                functools.partial(self.robotPoseCallback,
-                                                  goal_handle=goal_handle,
-                                                  trigger_event=trigger_event),
-                                1,
-                                callback_group=ReentrantCallbackGroup())
+                            PoseWithCovarianceStamped,
+                            'pose',
+                            functools.partial(self.robot_pose_callback,
+                                              goal_handle=goal_handle,
+                                              trigger_event=trigger_event),
+                            1,
+                            callback_group=ReentrantCallbackGroup())
             else:
                 # If the event was triggered, clear it
                 trigger_event.clear()
@@ -197,27 +204,25 @@ class Move2PosActionServer(Node):
                     # Return whatever result we have so far
                     return Move2Pos.Result(final_pose=self.curr_pose)
 
-                '''
-                Else, control de robot velocity to reach the desired goal
-                '''
+                # Else, control de robot velocity to reach the desired goal
 
                 # The angular velocity will be proportional to the angle of the
                 # target as seen by the robot.
                 target_local_pos = lfwft.world2LocalPoint(self.curr_pose,
                                                           target_position)
                 angle_to_target = atan2(target_local_pos.y, target_local_pos.x)
-                ang_vel = self.Kp_ang_vel * angle_to_target
+                ang_vel = self.kp_ang_vel * angle_to_target
 
                 # We will not update the linear velocity if the robot is not
                 # facing the target enough. If it is, then the linear velocity
                 # will be proportional to the distance, increased with the
                 # target velocity. We actually use the squared distance just
                 # for performance reasons.
-                distance = sqrt((self.curr_pose.x-target_position.x)**2 +
-                                (self.curr_pose.y-target_position.y)**2)
+                distance = sqrt((self.curr_pose.x - target_position.x)**2
+                                + (self.curr_pose.y - target_position.y)**2)
                 if abs(angle_to_target) < self.max_angle_to_target:
-                    lin_vel = self.Kp_lin_vel * distance + \
-                              self.velocity_at_target
+                    lin_vel = self.kp_lin_vel * distance + \
+                        self.velocity_at_target
                 else:
                     lin_vel = 0.0
 
@@ -251,11 +256,9 @@ class Move2PosActionServer(Node):
                     feedback.base_pose = self.curr_pose
                     goal_handle.publish_feedback(feedback)
 
-    def robotPoseCallback(self, msg: PoseWithCovarianceStamped, goal_handle,
-                          trigger_event):
-        '''
-        Receive current robot pose and change its velocity accordingly
-        '''
+    def robot_pose_callback(self, msg: PoseWithCovarianceStamped, goal_handle,
+                            trigger_event):
+        """Receive current robot pose and change its velocity accordingly."""
         with self.goal_lock:
             # If the goal is not active, there is nothing to do here
             if not goal_handle.is_active:
@@ -277,8 +280,7 @@ class Move2PosActionServer(Node):
 
 
 def main(args=None):
-    ''' Main function - start the action server.
-    '''
+    """Start the action server."""
     rclpy.init(args=args)
     move2pos_action_server = Move2PosActionServer()
 

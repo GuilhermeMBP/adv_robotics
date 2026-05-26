@@ -32,6 +32,7 @@ apt -y install ros-jazzy-desktop ros-jazzy-plotjuggler-ros ros-jazzy-nav2-map-se
 # Install additional ros packages
 apt -y install ros-jazzy-py-trees-ros ros-jazzy-py-trees-ros-interfaces ros-jazzy-py-trees-ros-viewer
 apt -y install ros-jazzy-rqt-tf-tree ros-jazzy-simple-launch ros-jazzy-tf-transformations
+apt -y install ros-jazzy-yasmin-editor ros-jazzy-ros ros-jazzy-yasmin-viewer ros-jazzy-yasmin ros-jazzy-yasmin-msgs ros-jazzy-yasmin-factory
 
 # Relevant ROS-related packages
 apt -y install python3-colcon-common-extensions python3-catkin-pkg-modules python3-rospkg-modules python3-rosdep

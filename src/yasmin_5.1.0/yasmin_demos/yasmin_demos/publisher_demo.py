@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+
+# Copyright (C) 2025 Miguel Ángel González Santamarta
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+import time
+
+import rclpy
+from std_msgs.msg import Int32
+from yasmin_ros.basic_outcomes import SUCCEED
+
+import yasmin
+from yasmin import Blackboard, CbState, StateMachine
+from yasmin_ros import PublisherState, set_ros_loggers
+from yasmin_viewer import YasminViewerPub
+
+
+class PublishIntState(PublisherState):
+    """
+    PublishIntState is a YASMIN ROS publisher state that sends incrementing integers
+    to the 'count' topic using std_msgs.msg.Int32 messages.
+
+    This state increments a counter on the blackboard and publishes it.
+    """
+
+    def __init__(self):
+        """
+        Initializes the PublishIntState with the topic 'count' and a message creation callback.
+        """
+        super().__init__(Int32, "count", self.create_int_msg)
+        self.set_description(
+            "Publishes an incrementing integer to the 'count' topic using values stored in the blackboard."
+        )
+        self.add_input_key(
+            "counter",
+            "Current counter value stored in the blackboard.",
+            0,
+        )
+        self.add_output_key(
+            "counter",
+            "Updated counter value after incrementing.",
+        )
+
+    def create_int_msg(self, blackboard: Blackboard) -> Int32:
+        """
+        Generates a std_msgs.msg.Int32 message with an incremented counter value.
+
+        Args:
+            blackboard (Blackboard): The shared data store between states.
+
+        Returns:
+            Int32: A ROS message containing the updated counter.
+        """
+        # Get and increment the counter from the blackboard
+        counter = blackboard.get("counter")
+        counter += 1
+        blackboard.set("counter", counter)
+
+        # Log the message creation
+        yasmin.YASMIN_LOG_INFO(f"Creating message {counter}")
+
+        # Create and return the message
+        msg = Int32()
+        msg.data = counter
+        return msg
+
+
+def check_count(blackboard: Blackboard) -> str:
+    """
+    Checks the current counter against a max threshold to determine state transition.
+
+    Args:
+        blackboard (Blackboard): The shared data store between states.
+
+    Returns:
+        str: The outcome string ('outcome1' or 'outcome2').
+    """
+    # Simulate processing time
+    time.sleep(1)
+
+    # Retrieve the counter and max value from blackboard
+    count = blackboard.get("counter")
+    max_count = blackboard.get("max_count")
+
+    yasmin.YASMIN_LOG_INFO(f"Checking count: {count}")
+
+    # Determine and return the outcome based on the counter value
+    if count >= max_count:
+        return "outcome1"
+    else:
+        return "outcome2"
+
+
+def main() -> None:
+    # Initialize ROS 2
+    rclpy.init()
+
+    # Set ROS 2 loggers
+    set_ros_loggers()
+    yasmin.YASMIN_LOG_INFO("yasmin_publisher_demo")
+
+    # Create a finite state machine (FSM)
+    sm = StateMachine([SUCCEED], handle_sigint=True)
+    sm.set_description(
+        "Publishes incrementing integers until the configured maximum count is reached."
+    )
+    sm.add_input_key(
+        "counter",
+        "Current counter value stored in the blackboard.",
+        0,
+    )
+    sm.add_input_key(
+        "max_count",
+        "Maximum counter threshold used to stop publishing.",
+        10,
+    )
+    sm.add_output_key(
+        "counter",
+        "Updated counter value after each publish step.",
+    )
+
+    checking_counts_state = CbState(["outcome1", "outcome2"], check_count)
+    checking_counts_state.set_description(
+        "Checks whether the counter stored in the blackboard reached the configured maximum."
+    )
+    checking_counts_state.add_input_key(
+        "counter",
+        "Current counter value.",
+        0,
+    )
+    checking_counts_state.add_input_key(
+        "max_count",
+        "Maximum counter threshold used to stop publishing.",
+        10,
+    )
+
+    # Add states to the FSM
+    sm.add_state(
+        "PUBLISHING_INT",
+        PublishIntState(),
+        {
+            SUCCEED: "CHECKING_COUNTS",
+        },
+    )
+    sm.add_state(
+        "CHECKING_COUNTS",
+        checking_counts_state,
+        {
+            "outcome1": SUCCEED,
+            "outcome2": "PUBLISHING_INT",
+        },
+    )
+
+    # Publish FSM information for visualization
+    YasminViewerPub(sm, "YASMIN_PUBLISHER_DEMO")
+
+    # Initialize blackboard with counter values
+    blackboard = Blackboard()
+    blackboard.set("counter", 0)
+    blackboard.set("max_count", 10)
+
+    # Execute the FSM
+    try:
+        outcome = sm(blackboard)
+        yasmin.YASMIN_LOG_INFO(outcome)
+    except Exception as e:
+        yasmin.YASMIN_LOG_WARN(e)
+
+    # Shutdown ROS 2 if it's running
+    if rclpy.ok():
+        rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

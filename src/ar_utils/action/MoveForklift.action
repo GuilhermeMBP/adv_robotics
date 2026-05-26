@@ -1,9 +1,8 @@
 # Goal:
-float32 position    # Desired forlkift position
+int8 position    # Desired forlkift position: 1 - up, 2 - down
 ---
 # Result:
 bool success             # True if successful, False otherwise
 ---
-# Feedback:
-ForkliftState state        # Current forklisft state
+# Feedback: None
 

@@ -29,13 +29,14 @@
 #
 # Revision $Id$
 
-'''@package docstring
+"""RechargeAction.
+
 Recharge action: Request charging.
-'''
+"""
 
 # Non-ROS modules
 import os
-from threading import Lock, Event
+from threading import Event, Lock
 import functools
 
 # ROS related modules
@@ -56,15 +57,17 @@ ACTION_NAME = os.path.basename(__file__)[:-3]
 
 
 class RechargeActionServer(Node):
-    '''
-        Charge the robot battery, if the robot is in a charging location.
-        This action accepts a single goal at a time so, requesting a new goal
-        while a previous one was alread running, cancels the previous goal.
-    '''
+    """RechargeActionServer.
+
+    Charge the robot battery, if the robot is in a charging location.
+    This action accepts a single goal at a time so, requesting a new goal
+    while a previous one was alread running, cancels the previous goal.
+    """
+
     # Store the action feecback and result functions as class attributes,
     # i.e., they are the same for all instances of this class
     def __init__(self):
-        '''Constructor'''
+        """Constructor."""
         super().__init__('action_recharge')
 
         # Robot name
@@ -84,8 +87,8 @@ class RechargeActionServer(Node):
         # Wait for the service fo bt available
         while self.charge_battery_svc.wait_for_service(2.0) is False:
             self.get_logger().info(
-                f'Executing action {ACTION_NAME}: still waiting for the ' +
-                f'battery service at {self.robot_name}/battery/charge...')
+                f'Executing action {ACTION_NAME}: still waiting for the '
+                + f'battery service at {self.robot_name}/battery/charge...')
 
         # Battery state subscriber (to be used later on)
         self.sub_batt = None
@@ -104,18 +107,24 @@ class RechargeActionServer(Node):
             callback_group=ReentrantCallbackGroup())
 
     def destroy(self):
-        ''' Destructor '''
+        """Destructor."""
         self.action_server.destroy()
         super().destroy_node()
 
     def goal_cb(self, goal_request):
-        '''This function is called when a new goal is requested. Currently it
-        always accept a new goal.'''
+        """Goal callback.
+
+        This function is called when a new goal is requested. Currently it
+        always accept a new goal.
+        """
         self.get_logger().info(f'{ACTION_NAME} received new goal request:')
         return GoalResponse.ACCEPT
 
     def handle_accepted_cb(self, goal_handle):
-        ''' This function runs whenever a new goal is accepted.'''
+        """Handle accepted callback.
+
+        This function runs whenever a new goal is accepted.
+        """
         with self.goal_lock:
             # This server only allows one goal at a time
             if (self.goal_handle is not None) and (self.goal_handle.is_active):
@@ -127,16 +136,16 @@ class RechargeActionServer(Node):
         goal_handle.execute()
 
     def cancel_cb(self, goal_handle):
-        ''' Callback that's called when an action cancellation is requested '''
+        """Callback that's called when an action cancellation is requested."""
         self.get_logger().info(f'{ACTION_NAME} received a cancel request!')
         # The cancel request was accepted
         return CancelResponse.ACCEPT
 
     def execute_cb(self, goal_handle):
-        ''' Callback to execute when the action has a new goal '''
+        """Callback to execute when the action has a new goal."""
         self.get_logger().info(
-            f'Executing action {ACTION_NAME} with battery-level ' +
-            f'goal {goal_handle.request.target_battery_level:2.2f}')
+            f'Executing action {ACTION_NAME} with battery-level '
+            + f'goal {goal_handle.request.target_battery_level:2.2f}')
 
         # Wait for a confimation (trigger), either due to the goal having
         # succeeded, or the goal having been cancelled.
@@ -159,7 +168,7 @@ class RechargeActionServer(Node):
                 self.sub_batt = self.create_subscription(
                     BatteryState,
                     'battery/state',
-                    functools.partial(self.batteryStateCb,
+                    functools.partial(self.battery_state_callback,
                                       goal_handle=goal_handle,
                                       trigger_event=trigger_event),
                     1,
@@ -177,7 +186,7 @@ class RechargeActionServer(Node):
                         self.sub_batt = self.create_subscription(
                             BatteryState,
                             'battery/state',
-                            functools.partial(self.batteryStateCb,
+                            functools.partial(self.battery_state_callback,
                                               goal_handle=goal_handle,
                                               trigger_event=trigger_event),
                             1,
@@ -227,10 +236,8 @@ class RechargeActionServer(Node):
                     feedback.battery_level = self.battery_level
                     goal_handle.publish_feedback(feedback)
 
-    def batteryStateCb(self, msg: BatteryState, goal_handle, trigger_event):
-        '''
-        Receive current robot battery charge
-        '''
+    def battery_state_callback(self, msg: BatteryState, goal_handle, trigger_event):
+        """Receive current robot battery charge."""
         with self.goal_lock:
             # Check if we are still "in business"
             if not goal_handle.is_active:
@@ -246,8 +253,7 @@ class RechargeActionServer(Node):
 
 
 def main(args=None):
-    ''' Main function - start the action server.
-    '''
+    """Main function - start the action server."""
     rclpy.init(args=args)
     recharge_action_server = RechargeActionServer()
 
