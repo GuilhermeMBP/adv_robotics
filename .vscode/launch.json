@@ -27,8 +27,13 @@
             "name": "Debug ROS2 CPP Node",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/install/stage_ros/lib/stage_ros/stageros",
-            "args": ["src/worlds/stage_worlds/lw2_new_new.world"],
+            "program": "${workspaceFolder}/install/ar_cpp_utils/lib/ar_cpp_utils/sim_control",
+            "args": [
+            //    "src/worlds/stage_worlds/lw2_new_new.world",
+                "--ros-args",
+                "--log-level", "INFO",
+                "-r", "__ns:=/robot_0"
+            ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [
