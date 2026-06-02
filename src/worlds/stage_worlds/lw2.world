@@ -57,6 +57,7 @@ pioneer2dx_base_no_sonar
 
     # mode properties
     size [0 0 0]
+    pose [0 0 -0.1 0]
   )
 
   forklift (
