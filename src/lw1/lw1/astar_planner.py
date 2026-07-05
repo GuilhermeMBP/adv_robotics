@@ -72,7 +72,10 @@ class AStarPlanner(Node):
         # before we subscribed the topic. To enable that behavior so, we
         # specify the TRANSIENT_LOCAL Durability Policy.
 
-        
+
+
+
+
 #----------------------------------------------------------------------------------------------
         self.map_filename = 'map.png'
         
@@ -90,6 +93,10 @@ class AStarPlanner(Node):
 
 #----------------------------------------------------------------------------------------------
 
+
+
+
+
         qos_profile = QoSProfile(
             history=QoSHistoryPolicy.KEEP_LAST, depth=1,
             reliability=QoSReliabilityPolicy.RELIABLE,
@@ -99,7 +106,14 @@ class AStarPlanner(Node):
         # Pose susbcriber
         self.sub_pose = self.create_subscription(PoseWithCovarianceStamped, 'pose', self.pose_cb, 1)
 
+
+
+
+
+
+
 #----------------------------------------------------------------------------------------------
+        # debug para celulas que o A* está a explorar
          # Setup publishers
         if DEBUG:
             # We will use this "color image" for debuggning purposes
@@ -109,8 +123,15 @@ class AStarPlanner(Node):
                 Image, 'dbg_search', qos_profile)
             
         # Goal pose subscriber
+        #fica á espera de receber o goal pose
         self.sub_goal = self.create_subscription(PoseStamped, 'goal_pose', self.goal_cb, 1)
 #----------------------------------------------------------------------------------------------
+
+
+
+
+
+
 
         # Costmap as occupancyGrid (for RViz)
         self.occ_grid_pub = self.create_publisher(OccupancyGrid, 'occgrid', 1)
@@ -118,8 +139,15 @@ class AStarPlanner(Node):
         # Path publisher
         self.path_pub = self.create_publisher(Path, 'path', 1)
 
+
+
+
+
+
+
 #----------------------------------------------------------------------------------------------
     @staticmethod
+    #devolve custo estimado da viagem
     def heuristic(current_position: MapPoint,
                   goal_position: MapPoint) -> float:
         '''
@@ -127,12 +155,13 @@ class AStarPlanner(Node):
         Returns the heuristic value.
         '''
         # Use Euclidean distance
+        #distancia em linha reta do robo ao destino
         return sqrt((goal_position.x-current_position.x)**2 +
                     (goal_position.y-current_position.y)**2)
     
 
 
-
+# vai buscar o mapa 2D e guarda e depois cria grafo para o A*
     def map_cb(self, msg: OccupancyGrid):
         '''
         Receive an Occupancygrid type message with the map and store an
@@ -159,6 +188,11 @@ class AStarPlanner(Node):
 #----------------------------------------------------------------------------------------------
 
 
+
+
+
+
+
     def pose_cb(self, msg):
         '''
             Navigation callback, executes on pose message received
@@ -176,9 +210,11 @@ class AStarPlanner(Node):
             f'Robot estimated pose (X, Y, Theta)= {self.robot_pose.x:.2f} [m]' +
             f', {self.robot_pose.y:.2f} [m], ' +
             f'{degrees(self.robot_pose.theta):.2f} [º]\r')
-        
+
+
+                              #TW06#     
 #----------------------------------------------------------------------------------------------
-    
+    #quando receber o goal pose, o A* é executado e o caminho é publicado
     def goal_cb(self, msg_goal_pose: PoseStamped):
         with self.lock:
             # Se ainda não há mapa ou posição do robô; espera pelo próximo goal
@@ -186,6 +222,7 @@ class AStarPlanner(Node):
                 self.get_logger().info(f'Ainda nao recebemos tud o que +precisamoew')
                 return
             
+            #passar para pixeis para o A* trabalhar com o mapa do start e do goal
             start_position_px = utils.meter2cell(Point2D(x=self.robot_pose.x,
                                                      y=self.robot_pose.y),
                                                        self.map_origin,
@@ -208,9 +245,11 @@ class AStarPlanner(Node):
             # the resulting path in the terminal output as text
             path = self.doSearch(start_pt, goal_pt)
             
+
+
+                #Se detetar caminho
             if path is not None:
                 
-
                 # Show the last graph image view
                 if DEBUG:
                     self.get_logger().debug('Showing final searched map')
@@ -221,6 +260,9 @@ class AStarPlanner(Node):
                     self.get_logger().debug('Showing final path')
                     self.graph.showPath(path, self.get_logger(), self.dbg_img_pub,
                                         self.get_clock().now().to_msg(), 'map')
+                    
+
+
                 # Create the path message to be published
                 path_to_publish = Path()
                 path_to_publish.header.stamp = self.get_clock().now().to_msg()
@@ -230,7 +272,9 @@ class AStarPlanner(Node):
                     curr_target = utils.cell2meter(Point2D(node.x, node.y),
                                                 self.map_origin,
                                                 self.map_resolution)
-                    # Add current target to the path
+                   
+
+                    # trasnforma cada ponto numa menssagem PoseStamped e adiciona á lista de poses do caminho
                     pose = PoseStamped()
                     pose.header.stamp = path_to_publish.header.stamp
                     pose.header.frame_id = path_to_publish.header.frame_id
@@ -243,11 +287,19 @@ class AStarPlanner(Node):
                     # Add to the path
                     path_to_publish.poses.append(pose)
 
-                # Put the goal pose orientation in the last pose of the path found (this will allow us to rotate the robot in the end of the path)
+
+
+
+                #Defina a orientação da pose desejada na última pose do percurso encontrado (para rotacionar o robô no final)
                 path_to_publish.poses[-1].pose.orientation = msg_goal_pose.pose.orientation
                 
+
+
+
                 # Publish the path
                 self.path_pub.publish(path_to_publish)
+
+                #se não detetar caminho
             else:
                 self.get_logger().warn(
                     'There is no solution for the specified problem!')
@@ -318,14 +370,22 @@ class AStarPlanner(Node):
 
 
 
-            ######  A* ######
 
-            # Add the nodes such that the ones with lowest total cost are
-            # in the beggining.
+
+
+
+
+
+
+
+
+            ######  A* ####################################
+
+            #adiciona os nodes vizinhos do atual á lista, ordenados do custo menor para o maior
+            #dai o pop left
             for new_node in newNodes:
-                # Look for the node with higher total cost than this one,
-                # and insert the new node before that node.
-                # This could be done in a more efficient way!
+                # Procura na lista os nós que têm custo total superior ao do novo nó
+                # e mete o novo nó antes desse primeiro com maior custo
                 i = 0
                 while i < len(nodesToExplore):
                     if (nodesToExplore[i].total_cost_ >
@@ -335,27 +395,26 @@ class AStarPlanner(Node):
                         i += 1
                 nodesToExplore.insert(i, new_node)
 
-        # If a solution was found, return the corresponding path, else, return
-        # None.
+        #Se encontorou o destino, vai seguir os pais dos nodes até ao inicio para construir o caminho
         if solutionFound:
+            #cria uma lista para guardar o caminho final
             finalPath = deque()
-            # Get goal node
+            # vai ao grafo buscar o goal position para começar a construir o caminho final
             node = self.graph.nodes_list_[goal_position.label]
-            # Cycle through all available nodes starting from the goal to the
-            # start node.
+
+            # passa por todos os nodes disponiveis do goal até ao inicio
             while (True):
                 finalPath.appendleft(node.map_position_)
-                # get this node parent
+                # vai buscar o pai do node atual para adicionar ao caminho
                 node = node.parent_
-                # If this new node is our start position, i.e., it is our root,
-                # we are finished
+                # se este novo node for o inicio, adiciona o caminho e sai do ciclo
                 if (node == self.graph.root_):
                     finalPath.appendleft(node.map_position_)
                     break
             return finalPath
         else:
             return None
-
+#----------------------------------------------------------------------------------------------
 
 
 def main(args=None):

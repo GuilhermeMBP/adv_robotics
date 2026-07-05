@@ -127,11 +127,17 @@ class BasicMapping(Node):
         # Provide the map save service.
         self.create_service(Trigger, 'map_save', self.map_saver_svc)
 
+
+
+#---------------------------------------------------------------------------------------
         # Verifica se já existe mapa e se existir dá load
         if os.path.exists(self.original_map_name):
+            #menssagem de debug quando vai tentar carregar o mapa
             self.get_logger().info(f'Loading existing map from {self.original_map_name}...')
-            # Carrega a imagem do mapa
+            # Carrega a imagem do mapa em escala de cinza (grayscale)
             loaded_map = cv2.imread(self.original_map_name, cv2.IMREAD_GRAYSCALE)
+            
+            #verificação se a imagem foi carregada corretamente
             if loaded_map is not None:
                 # A imagem é carregada com o eixo y invertido, então temos de inverter
                 loaded_map = np.flip(loaded_map, 0)
@@ -145,6 +151,10 @@ class BasicMapping(Node):
                 self.get_logger().info('Map loaded successfully!')
             else:
                 self.get_logger().error('Failed to load the map image.')
+
+
+
+#---------------------------------------------------------------------------------------
 
     def timer_cb(self):
         with self.lock:
@@ -299,8 +309,8 @@ class BasicMapping(Node):
             # Definir desconhecido: onde a grelha é -1, pomos 128 
             map_save[self.occ_map == self.unkown_cell_value] = 128
 
-            # 2. ESPAÇO DE CONFIGURAÇÃO (Inflação de 25cm)------------------
-            # O robô tem 25cm de raio. Com resolução de 0.05m/px, são 5 píxeis 
+            # 2. ESPAÇO DE CONFIGURAÇÃO (Inflação de 30cm)------------------
+            # O robô tem 25cm de raio. Com resolução de 0.05m/px, são 6 píxeis 
             raio_px = int(0.30 / self.map_resolution)
             
 
@@ -343,7 +353,9 @@ class BasicMapping(Node):
                     image=self.map_filename,
                     resolution=self.map_resolution,
                     origin=self.map_origin,
+#-------------------------------
                     negate=1, # o mapa está a ser guardado no formato invertido ao standard do nav2
+#-------------------------------
                     occupied_thresh=0.65,  # >= 0.65 => occupied
                     free_thresh=0.35,  # <= 0.35 => free
                 )
