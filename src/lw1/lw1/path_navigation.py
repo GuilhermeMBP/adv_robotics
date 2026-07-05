@@ -269,12 +269,9 @@ class BasicWaypointPathNavigation(Node):
         vel_cmd.angular.z = ang_vel
         vel_cmd.linear.x = lin_vel
         self.vel_pub.publish(vel_cmd)
-<<<<<<< HEAD
         
 
 
-=======
->>>>>>> 7670cfc4ce922cea11c4214a8cc6893ea8c2d6b7
 
 def main(args=None):
     '''
