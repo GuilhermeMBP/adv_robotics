@@ -34,6 +34,7 @@ discharging.
 // ROS API
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float32.hpp>
+#include <std_msgs/msg/int8.hpp>
 #include <std_msgs/msg/u_int8.hpp>
 #include <std_msgs/msg/u_int8_multi_array.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
@@ -43,11 +44,12 @@ discharging.
 #include <sensor_msgs/msg/battery_state.hpp> // BatteryState
 #include <tf2/utils.h> // Geometry transformations
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-
+#include <message_filters/subscriber.hpp>
+#include <message_filters/synchronizer.hpp>
+#include <message_filters/sync_policies/approximate_time.hpp>
 // Our files
 #include "ar_cpp_utils/LocalFrameWorldFrameTransformations.hpp"
 #include "ar_utils/srv/start_charging.hpp"
-#include "ar_utils/msg/forklift_state.hpp"
 
 // Other includes
 #include <mutex>
@@ -55,21 +57,36 @@ discharging.
 #include <math.h>
 
 #define RAD2DEG(x) x/3.1415927*180
+// Beware that these two numberss cannot be changed without changing the code
+//below to account for the new values.
 #define NUM_PARTS 5 // Number of available parts/input/outputs
-#define NUM_PMAN 8 // Number of processing machines
+#define NUM_PMAN 3 // Number of processing machines
+#define NUM_DUNITS 2 // Number of delivery units
+#define NUM_CUNITS 3 // Number of charging units
 
 enum part_state_t {
   PART_UNPROCESSED = 0, // Part was not yet processed
   PART_IN_PROCESS, // Part is being processed
   PART_PROCESSED, // Part was already processed
   PART_DELIVERED, // Part was already processed and delivered at its destination
-  // From this point onwards, there are internal states only, not to be sent
-  PART_UNPROCESSED_PICKING, // Unprocessed part is being picked up
-  PART_UNPROCESSED_PICKED_UP, // Unprocessed part was picked up
-  PART_IN_PROCESS_DROPING, // Part being droped intro processing machine
-  PART_PROCESSED_PICKING, // Processed part is being picked up
-  PART_PROCESSED_PICKED_UP, // Processed part was picked up
-  PART_PROCESSED_DELIVERED_DROPING // Part is being droped for delivery
+};
+
+enum forklift_state_t {
+  FORKLIFT_UNKNOWN = 0,
+  FORKLIFT_UP = 1,
+  FORKLIFT_DOWN = 2,
+  FORKLIFT_MOVING_UP = 3,
+  FORKLIFT_MOVING_DOWN = 4
+};
+
+
+class Rect
+{
+public:
+  Rect(point_2d top_left, point_2d bottom_right) : tl(top_left), br(bottom_right) {}
+  
+  point_2d tl; // Top left corner
+  point_2d br; // Bottom right corner
 };
 
 class SimControl : public rclcpp::Node
@@ -81,9 +98,7 @@ class SimControl : public rclcpp::Node
       std::string robot_name = "/robot_0/";
 
       // Forklift related
-      forklift_state_.position = 0.0;
-      forklift_state_.moving = false;
-      forklift_down_ = true;
+      forklift_state_ = FORKLIFT_DOWN;
 
       // Battery information
       battery_state_.voltage = 12.0;
@@ -110,11 +125,6 @@ class SimControl : public rclcpp::Node
       for(uint i=0; i < NUM_PARTS; i++)
         parts_status_msg_.data.push_back(PART_UNPROCESSED);
 
-      // Publisher for the forklift status
-      pub_forklift_ = create_publisher<ar_utils::msg::ForkliftState>(
-          robot_name + "forklift/state", 
-          rclcpp::QoS(1).reliable().transient_local());
-      // Publisher for the parts status
       pub_parts_status_ = create_publisher<std_msgs::msg::UInt8MultiArray>(
             "parts_sensor", 
             rclcpp::QoS(1).reliable().transient_local());
@@ -126,23 +136,34 @@ class SimControl : public rclcpp::Node
         robot_name + "cmd_vel", rclcpp::QoS(rclcpp::KeepLast(1)));
 
       /// Setup subscribers
-      // Real, error-free robot pose (for debug purposes only)
-      sub_real_pose_ = create_subscription<nav_msgs::msg::Odometry>(
-          robot_name + "base_pose_ground_truth", 1,
-          std::bind(&SimControl::realPoseCallback, this,
-                    std::placeholders::_1));
+      // Real, error-free robot and parts pose
+      rclcpp::QoS qos = rclcpp::QoS(5);
+      sub_real_pose_.subscribe(this, robot_name + "base_pose_ground_truth", qos.get_rmw_qos_profile());
+      for (int i = 0; i < NUM_PARTS; i++)
+        sub_parts_location_[i].subscribe(this, "/robot_" + std::to_string(i+1) + "/base_pose_ground_truth", qos.get_rmw_qos_profile());
+
+      // build policy type: ApproximateTime<Odometry, Odometry, ...>
+      sync_ = std::make_shared<message_filters::Synchronizer<
+        message_filters::sync_policies::ApproximateTime<
+          nav_msgs::msg::Odometry, nav_msgs::msg::Odometry, nav_msgs::msg::Odometry,
+          nav_msgs::msg::Odometry, nav_msgs::msg::Odometry, nav_msgs::msg::Odometry>>>(
+        message_filters::sync_policies::ApproximateTime<
+          nav_msgs::msg::Odometry, nav_msgs::msg::Odometry, nav_msgs::msg::Odometry,
+          nav_msgs::msg::Odometry, nav_msgs::msg::Odometry, nav_msgs::msg::Odometry>(10),
+      sub_real_pose_, sub_parts_location_[0], sub_parts_location_[1],
+      sub_parts_location_[2], sub_parts_location_[3], sub_parts_location_[4]);
+
+      sync_->setAgePenalty(0.15);
+      sync_->registerCallback(std::bind(&SimControl::posesCallback, this,
+         std::placeholders::_1, std::placeholders::_2, std::placeholders::_3,
+         std::placeholders::_4, std::placeholders::_5, std::placeholders::_6));
+
       // Setup subscriber for the forlift commands
-      sub_forklift_ = create_subscription<std_msgs::msg::Float32>(
-        robot_name + "forklift/goal_position", 1,
+      sub_forklift_ = create_subscription<std_msgs::msg::Int8>(
+        robot_name + "cmd_forklift", 1,
           std::bind(&SimControl::forkliftCallback, this,
                     std::placeholders::_1));
-      // Baterry manager (subscriber to the clock)
-      sub_bat_ = create_subscription<rosgraph_msgs::msg::Clock>(
-          "/clock", 1,
-          std::bind(&SimControl::batteryCallback, this,
-          std::placeholders::_1));
 
-      // Advertise the batter charging service
       // Advertise the battery charging service
       svc_charge_ = create_service<ar_utils::srv::StartCharging>(
           robot_name + "battery/charge",
@@ -189,8 +210,7 @@ class SimControl : public rclcpp::Node
       if((abs(sqrt(pow(robot_speed.x,2) + 
                    pow(robot_speed.y,2))) > MAX_LIN_SPEED_ ||
          (abs(robot_speed.theta) > MAX_ANG_SPEED_)) ||
-         (abs(robot_pose.x - charging_pose_.x) > 0.20) ||
-         (abs(robot_pose.y - charging_pose_.y) > 0.20) )
+         (is_robot_in_charging_unit(robot_pose.x, robot_pose.y) == -1))
       {
         battery_state_.power_supply_status = 
           sensor_msgs::msg::BatteryState::POWER_SUPPLY_STATUS_DISCHARGING;
@@ -198,6 +218,7 @@ class SimControl : public rclcpp::Node
         RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Battery not charging...");
       } else
       {
+        // The robot as low speed and is in a charging unit. Lets recharge it!
         battery_state_.power_supply_status = 
           sensor_msgs::msg::BatteryState::POWER_SUPPLY_STATUS_CHARGING;
         res->charging = true;
@@ -210,11 +231,17 @@ class SimControl : public rclcpp::Node
     /**
      * Periodic callback to control charging/discharging
      */
-    void batteryCallback(const rosgraph_msgs::msg::Clock::SharedPtr)
+    void batteryCallback()
     {
       battery_state_mutex_.lock();
-      if(battery_state_.power_supply_status != 
+      if(battery_state_.power_supply_status == 
          sensor_msgs::msg::BatteryState::POWER_SUPPLY_STATUS_DISCHARGING)
+      {
+        if(battery_state_.percentage > BATT_DISCHARGE_DELTA_)
+          battery_state_.percentage -= BATT_DISCHARGE_DELTA_;
+        else
+          battery_state_.percentage = 0;
+      } else
       {
         // Check if our position is still good, and that we are stopped
         pose_vel_mutex_.lock();
@@ -224,8 +251,7 @@ class SimControl : public rclcpp::Node
         if((abs(sqrt(pow(robot_speed.x,2) + 
                      pow(robot_speed.y,2))) > MAX_LIN_SPEED_ ||
            (abs(robot_speed.theta) > MAX_ANG_SPEED_)) ||
-           (abs(robot_pose.x - charging_pose_.x) > 0.20) ||
-           (abs(robot_pose.y - charging_pose_.y) > 0.20) )
+           (is_robot_in_charging_unit(robot_pose.x, robot_pose.y) == -1))
         {
           battery_state_.power_supply_status = 
             sensor_msgs::msg::BatteryState::POWER_SUPPLY_STATUS_DISCHARGING;
@@ -240,12 +266,6 @@ class SimControl : public rclcpp::Node
               sensor_msgs::msg::BatteryState::POWER_SUPPLY_STATUS_FULL;
           }
         }
-      } else
-      {
-        if(battery_state_.percentage > BATT_DISCHARGE_DELTA_)
-          battery_state_.percentage -= BATT_DISCHARGE_DELTA_;
-        else
-          battery_state_.percentage = 0;
       }
 
       // Pubish the battery state
@@ -265,26 +285,50 @@ class SimControl : public rclcpp::Node
     /**
      * Receive and store desired forklift value
      */
-    void forkliftCallback(const std_msgs::msg::Float32::SharedPtr msg)
+    void forkliftCallback(const std_msgs::msg::Int8::SharedPtr msg)
     {
       // Process forklift request (store desired position)
-      forklift_desired_pos_ = msg->data;
+      if (msg->data == forklift_state_)
+        return; // Nothing to do.
+      if ((msg->data == 1) && (forklift_state_ != FORKLIFT_UP))
+      {
+        forklift_state_ = FORKLIFT_MOVING_UP; // Moving up
+        last_forklift_cmd_time_ = get_clock()->now();
+        return;
+      }
+      if ((msg->data == 2) && (forklift_state_ != FORKLIFT_DOWN))
+      {
+        forklift_state_ = FORKLIFT_MOVING_DOWN; // Moving down
+        last_forklift_cmd_time_ = get_clock()->now();
+        return;
+      }
     }
 
     /**
      * Receive and store current robot real pose
      */
-    void realPoseCallback(const nav_msgs::msg::Odometry::SharedPtr msg)
+    void posesCallback(
+      const nav_msgs::msg::Odometry::ConstSharedPtr& robot,
+      const nav_msgs::msg::Odometry::ConstSharedPtr& part1,
+      const nav_msgs::msg::Odometry::ConstSharedPtr& part2,
+      const nav_msgs::msg::Odometry::ConstSharedPtr& part3,
+      const nav_msgs::msg::Odometry::ConstSharedPtr& part4,
+      const nav_msgs::msg::Odometry::ConstSharedPtr& part5)
     {
+      // Call the batrery callback on every iteration
+      this->batteryCallback();
+
+      std::vector<nav_msgs::msg::Odometry::ConstSharedPtr> parts_msgs = 
+        {part1, part2, part3, part4, part5};
+
       // Store real, error-free pose values given by the simulator
       geometry_msgs::msg::Pose2D robot_pose, robot_speed;
-      point_2d part_pos, part_local_pos;
-      robot_pose.x = msg->pose.pose.position.x;
-      robot_pose.y = msg->pose.pose.position.y;
-      robot_pose.theta = tf2::getYaw(msg->pose.pose.orientation);
-      robot_speed.x = msg->twist.twist.linear.x;
-      robot_speed.y = msg->twist.twist.linear.y;
-      robot_speed.theta = msg->twist.twist.angular.z;
+      robot_pose.x = robot->pose.pose.position.x;
+      robot_pose.y = robot->pose.pose.position.y;
+      robot_pose.theta = tf2::getYaw(robot->pose.pose.orientation);
+      robot_speed.x = robot->twist.twist.linear.x;
+      robot_speed.y = robot->twist.twist.linear.y;
+      robot_speed.theta = robot->twist.twist.angular.z;
 
       // Update global values
       pose_vel_mutex_.lock();
@@ -292,256 +336,116 @@ class SimControl : public rclcpp::Node
       global_robot_speed_ = robot_speed;
       pose_vel_mutex_.unlock();
 
-      // If the robot is moving, do nothing
-      // Assume we cannot interact with the parts in motion
-      bool excess_speed = false;
-      if((abs(sqrt(pow(robot_speed.x,2) + 
-                   pow(robot_speed.y,2))) > MAX_LIN_SPEED_ ||
-         (abs(robot_speed.theta) > MAX_ANG_SPEED_)))
-        excess_speed = true;
+      // If enough time has elapsed, assume the forklift has finished moving
+      if(((forklift_state_ == FORKLIFT_MOVING_UP) ||
+          (forklift_state_ == FORKLIFT_MOVING_DOWN)) &&
+         ((get_clock()->now() - last_forklift_cmd_time_).seconds() > FORKLIFT_TIME_))
+      {
+        if(forklift_state_ == FORKLIFT_MOVING_UP)
+        {
+          forklift_state_ = FORKLIFT_UP;
+        } else if(forklift_state_ == FORKLIFT_MOVING_DOWN)
+        {
+          forklift_state_ = FORKLIFT_DOWN;
+        }
+      }
 
       // Change each part information according to the forklift position
-      //and robot pose
+      //and the robot pose
       bool part_ext_status_changed = false;
+      int pu_num = -1;
+      int du_num = -1;
       for(uint part_num=0; part_num < NUM_PARTS; part_num++)
       {
-        float dangle;
+        // Get this part position
+        point_2d part_pos;
+        part_pos.x = parts_msgs[part_num]->pose.pose.position.x;
+        part_pos.y = parts_msgs[part_num]->pose.pose.position.y;
+        RCLCPP_DEBUG(rclcpp::get_logger("rclcpp"),
+                    "box%d position: (%.2f, %.2f)",
+                    part_num+1, part_pos.x, part_pos.y);
+
         switch(parts_state_[part_num])
         {
           // Part is still unprocessed
-          case PART_UNPROCESSED:
-            // We cannot start picking up a part if we are moving
-            if(excess_speed)
-              continue;
-            // Get this part position
-            part_pos.x = input_parts_[part_num].x;
-            part_pos.y = input_parts_[part_num].y;
-            world2Local(robot_pose, part_pos, &part_local_pos);
-            // Get the angle error
-            dangle = atan2(part_local_pos.y, part_local_pos.x);
-            // Check if the robot is enough near the approach pose and the
-            // forklift is down
-            if((part_local_pos.x > 0.0) && (part_local_pos.x < MAX_X_OFFSET_) &&
-               (abs(dangle) < MAX_ANG_ERROR_) && forklift_down_)
+          case part_state_t::PART_UNPROCESSED:
+            // Check if the part is in a processing unit and the robot is not
+            // in that processing unit.
+            pu_num = is_part_in_processing_unit(part_pos);
+            if (pu_num != -1 )
             {
-              // The robot is well placed to pick the part
-              parts_state_[part_num] = PART_UNPROCESSED_PICKING;
-              RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                          "Part %d is being picked up from input station...",
-                          part_num+1);
-            }
-            break;
-
-          // Part is being picked up
-          case PART_UNPROCESSED_PICKING:
-            // We cannot start picking up a part if we are moving
-            if(excess_speed)
-              continue;
-            // Get the distance error
-            part_pos.x = input_parts_[part_num].x;
-            part_pos.y = input_parts_[part_num].y;
-            world2Local(robot_pose, part_pos, &part_local_pos);
-            // Get the angle error
-            dangle = atan2(part_local_pos.y, part_local_pos.x);
-            // Check if the robot is enough near the approach pose and the
-            // forklift is up
-            if((part_local_pos.x > 0.0) && 
-               (part_local_pos.x < MAX_X_OFFSET_) &&
-               (abs(dangle) < MAX_ANG_ERROR_) && forklift_up_)
-            {
-              // The robot picked the part and now can tansport it
-              parts_state_[part_num] = PART_UNPROCESSED_PICKED_UP;
-              RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                          "Part %d was picked up from input station...",
-                          part_num+1);
-            }
-            break;
-
-          // Part is being transported
-          case PART_UNPROCESSED_PICKED_UP:
-            // We cannot start picking up a part if we are moving
-            if(excess_speed)
-              continue;
-            // Check if the robot is able to drop the part in a processing machine
-            for(uint pb_num=0; pb_num < NUM_PMAN; pb_num++)
-            {
-              // Get this part position
-              part_pos.x = process_parts_[pb_num].x;
-              part_pos.y = process_parts_[pb_num].y;
-              world2Local(robot_pose, part_pos, &part_local_pos);
-              if((part_local_pos.x > 0.0) &&
-                 (part_local_pos.x < MAX_X_OFFSET_))
-              {
-                // Check the angle and the forklift position
-                dangle = atan2(part_local_pos.y, part_local_pos.x);
-                if((abs(dangle) < MAX_ANG_ERROR_) && (forklift_up_ == false))
-                {
-                  // The robot is ready to start placing the part
-                  parts_state_[part_num] = PART_IN_PROCESS_DROPING;
-                  parts_location_[part_num] = pb_num;
-                  RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                              "Part %d is being placed for processing...",
-                              part_num+1);
-                  break; // No need to check for others
-                }
-              }
-            }
-            break;
-
-          // Part is being dropped in a processing station
-          case PART_IN_PROCESS_DROPING:
-            // We cannot start picking up a part if we are moving
-            if(excess_speed)
-              continue;
-            // If the robot position is still fine and the forklift is down
-            //the part is droped into the processing machine
-            // Get this part position
-            part_pos.x = process_parts_[parts_location_[part_num]].x;
-            part_pos.y = process_parts_[parts_location_[part_num]].y;
-            world2Local(robot_pose, part_pos, &part_local_pos);
-
-            if((part_local_pos.x > 0.0) && (part_local_pos.x < MAX_X_OFFSET_))
-            {
-              dangle = atan2(part_local_pos.y, part_local_pos.x);
-              if((abs(dangle) < MAX_ANG_ERROR_) && forklift_down_)
+              if ((forklift_state_ == FORKLIFT_DOWN) &&
+                  (!is_position_in_location(robot_pose.x, robot_pose.y,
+                                           processing_units_location_[pu_num])))
               {
                 // The robot has placed the part, it is now processing
-                parts_state_[part_num] = PART_IN_PROCESS;
+                parts_state_[part_num] = part_state_t::PART_IN_PROCESS;
+                parts_location_[part_num] = pu_num; // Processing unit number
                 part_ext_status_changed = true;
-                parts_status_msg_.data[part_num] = PART_IN_PROCESS;
+                parts_status_msg_.data[part_num] = part_state_t::PART_IN_PROCESS;
                 int32_t dt = lrint(20.0+(rand()*1.0/RAND_MAX)*30);
-                parts_timestamps_[part_num].sec = msg->header.stamp.sec + dt;
+                parts_timestamps_[part_num].sec = robot->header.stamp.sec + dt;
+                parts_timestamps_[part_num].nanosec = robot->header.stamp.nanosec;
                 RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
                             "Part %d is being processed...",
                             part_num+1);
-                break; // No need to check for others
               }
             }
             break;
 
           // Part is being processed in a processing station
-          case PART_IN_PROCESS:
-            // If enough time passed by, part is done processing
-            // Do not care about the nano secs
-            if(msg->header.stamp.sec >= parts_timestamps_[part_num].sec)
+          case part_state_t::PART_IN_PROCESS:
+            // If the robot is inside the processing unit, change the part back
+            // into UNPROCESSED STATE.
+            if (is_position_in_location(robot_pose.x, robot_pose.y,
+                  processing_units_location_[parts_location_[part_num]]))
             {
-              parts_state_[part_num] = PART_PROCESSED;
+              parts_state_[part_num] = part_state_t::PART_UNPROCESSED;
               part_ext_status_changed = true;
-              parts_status_msg_.data[part_num] = PART_PROCESSED;
+              parts_status_msg_.data[part_num] = part_state_t::PART_UNPROCESSED;
               RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                          "Part %d has finished processing...",
+                          "Part %d is no longr being processed...",
                           part_num+1);
+            } else
+            {
+              // If enough time passed by, part is done processing
+              if((robot->header.stamp.sec >= parts_timestamps_[part_num].sec) &&
+                (robot->header.stamp.nanosec >= parts_timestamps_[part_num].nanosec))
+              {
+                parts_state_[part_num] = part_state_t::PART_PROCESSED;
+                part_ext_status_changed = true;
+                parts_status_msg_.data[part_num] = part_state_t::PART_PROCESSED;
+                RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
+                            "Part %d has finished processing...",
+                            part_num+1);
+              }
             }
             break;
 
           // Part is done processing, we can now pick it up
-          case PART_PROCESSED:
-            // We cannot start picking up a part if we are moving
-            if(excess_speed)
-              continue;
-            // If the robot position is fine and the forklift is down
-            //the part is being picked up in processing machine
-            // Get this part position
-            part_pos.x = process_parts_[parts_location_[part_num]].x;
-            part_pos.y = process_parts_[parts_location_[part_num]].y;
-            world2Local(robot_pose, part_pos, &part_local_pos);
-            if((part_local_pos.x > 0.0) && (part_local_pos.x < MAX_X_OFFSET_))
+          case part_state_t::PART_PROCESSED:
+            // If the part is processed, it is on a delivery unit, and the robot
+            // is not in that delivery unit, we can consider it delivered.
+            du_num = is_part_in_delivery_unit(part_pos);
+            
+            if( du_num != -1 )
             {
-              dangle = atan2(part_local_pos.y, part_local_pos.x);
-              if((abs(dangle) < MAX_ANG_ERROR_) && forklift_down_)
+              if ((forklift_state_ == FORKLIFT_DOWN) &&
+                 (!is_position_in_location(robot_pose.x, robot_pose.y,
+                delivery_units_location_[du_num])))
               {
-                parts_state_[part_num] = PART_PROCESSED_PICKING;
-                RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                            "Part %d is being picked up from processing...",
-                            part_num+1);
-              }
-            }
-            break;
-
-          // Part is being picked up in the processing machine
-          case PART_PROCESSED_PICKING:
-            // We cannot start picking up a part if we are moving
-            if(excess_speed)
-              continue;
-            // If the robot position is fine and the forklift is up
-            //the part is picked up from the processing machine
-            // Get this part position
-            part_pos.x = process_parts_[parts_location_[part_num]].x;
-            part_pos.y = process_parts_[parts_location_[part_num]].y;
-            world2Local(robot_pose, part_pos, &part_local_pos);
-            if((part_local_pos.x > 0.0) && (part_local_pos.x < MAX_X_OFFSET_))
-            {
-              dangle = atan2(part_local_pos.y, part_local_pos.x);
-              if((abs(dangle) < MAX_ANG_ERROR_) && forklift_up_)
-              {
-                parts_state_[part_num] = PART_PROCESSED_PICKED_UP;
-                RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                            "Part %d was picked up from processing...",
-                            part_num+1);
-              }
-            }
-            break;
-
-          // Part is being transported, it can be delivered
-          case PART_PROCESSED_PICKED_UP:
-            // We cannot start dropping down a part if we are moving
-            if(excess_speed)
-              continue;
-            // Check if the robot is able to drop the part in a processing machine
-            for(uint pb_num=0; pb_num < NUM_PARTS; pb_num++)
-            {
-              // Get this part position
-              part_pos.x = output_parts_[pb_num].x;
-              part_pos.y = output_parts_[pb_num].y;
-              world2Local(robot_pose, part_pos, &part_local_pos);
-              if((part_local_pos.x > 0.0) && 
-                 (part_local_pos.x < MAX_X_OFFSET_))
-              {
-                // Check the angle and the forklift position
-                dangle = atan2(part_local_pos.y, part_local_pos.x);
-                if((abs(dangle) < MAX_ANG_ERROR_) && forklift_up_)
-                {
-                  // The robot is ready to start placing the part
-                  parts_state_[part_num] = PART_PROCESSED_DELIVERED_DROPING;
-                  parts_location_[part_num] = pb_num;
-                  RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                              "Part %d is being delivered...",
-                              part_num+1);
-                  break; // No need to check for others
-                }
-              }
-            }
-            break;
-
-          // Part is being delivered
-          case PART_PROCESSED_DELIVERED_DROPING:
-            // We cannot start dropping down a part if we are moving
-            if(excess_speed)
-              continue;
-            // If the robot position is still fine and the forklift is down
-            //the part is delivered
-            // Get this part position
-            part_pos.x = output_parts_[parts_location_[part_num]].x;
-            part_pos.y = output_parts_[parts_location_[part_num]].y;
-            world2Local(robot_pose, part_pos, &part_local_pos);
-            if((part_local_pos.x > 0.0) && (part_local_pos.x < MAX_X_OFFSET_))
-            {
-              dangle = atan2(part_local_pos.y, part_local_pos.x);
-              if((abs(dangle) < MAX_ANG_ERROR_) && forklift_down_)
-              {
-                // The robot has placed the part, it now delivered
-                parts_state_[part_num] = PART_DELIVERED;
+                // The robot has placed the part, it is now delivered
+                parts_state_[part_num] = part_state_t::PART_DELIVERED;
                 part_ext_status_changed = true;
-                parts_status_msg_.data[part_num] = PART_DELIVERED;
+                parts_status_msg_.data[part_num] = part_state_t::PART_DELIVERED;
                 RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
                             "Part %d has been delivered...",
                             part_num+1);
-                break; // No need to check for others
               }
             }
             break;
 
-          case PART_DELIVERED:
+          case part_state_t::PART_DELIVERED:
             // Nothing to do/check
             break;
 
@@ -566,128 +470,139 @@ class SimControl : public rclcpp::Node
       if(first_time_)
       {
         pub_parts_status_->publish(parts_status_msg_);
-        pub_forklift_->publish(forklift_state_);
-        last_time_ = get_clock()->now();
         first_time_ = false;
-      }
-
-      // Else, usual business
-      float delta = forklift_desired_pos_ - forklift_state_.position;
-      rclcpp::Time current_time = get_clock()->now();
-      double dt = (current_time - last_time_).seconds();
-      last_time_ = current_time;
-      // Process forklift data and publish if we have a new value
-      if( abs(delta) > 0.001 )
-      {
-        // Move forklift
-        if(delta > 0)
-          forklift_state_.position =
-            clipValue(forklift_state_.position + FORKLIFT_SPEED_*dt,
-                      FORKLIFT_DOWN_, FORKLIFT_UP_);
-        else
-          forklift_state_.position =
-            clipValue(forklift_state_.position - FORKLIFT_SPEED_*dt,
-                      FORKLIFT_DOWN_, FORKLIFT_UP_);
-        if(forklift_state_.position < FORKLIFT_DOWN_ + FORKLIFT_MARGIN_)
-        {
-          if(forklift_down_ == false)
-          {
-            forklift_down_ = true;
-            forklift_up_ = false;
-            RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                        "Forklift is down...");
-          }
-        } else if(forklift_state_.position > FORKLIFT_UP_ - FORKLIFT_MARGIN_)
-        {
-          if(forklift_up_ == false)
-          {
-            forklift_down_ = false;
-            forklift_up_ = true;
-            RCLCPP_INFO(rclcpp::get_logger("rclcpp"),
-                        "Forklift is up...");
-          }
-        } else
-        {
-          forklift_down_ = false;
-          forklift_up_ = false;
-        }
-        if(forklift_desired_pos_ - forklift_state_.position <= 0.001)
-          forklift_state_.moving = false;
-        else
-          forklift_state_.moving = true;
-        // Publish new value, if changed
-        pub_forklift_->publish(forklift_state_);
-      }
+      } else
+        main_loop_timer_->cancel();
     }
 
   private:
+    bool is_position_in_location(double x, double y, Rect location)
+    {
+      if((x > location.tl.x) && (x < location.br.x) &&
+         (y < location.tl.y) && (y > location.br.y))
+        return true;
+      else
+        return false;
+    }
+
+    int is_part_in_processing_unit(point_2d part_location)
+    {
+      for(uint pu_num=0; pu_num < NUM_PMAN; pu_num++)
+      {
+        if(is_position_in_location(part_location.x,
+                                   part_location.y,
+                                   processing_units_location_[pu_num]))
+          return pu_num;
+      }
+      return -1;
+    }
+
+    int is_part_in_delivery_unit(point_2d part_location)
+    {
+      for(uint du_num=0; du_num < NUM_DUNITS; du_num++)
+      {
+        if(is_position_in_location(part_location.x,
+                                   part_location.y,
+                                   delivery_units_location_[du_num]))
+          return du_num;
+      }
+      return -1;
+    }
+
+    int is_robot_in_charging_unit(double x, double y)
+    {
+      for(uint cu_num=0; cu_num < NUM_CUNITS; cu_num++)
+      {
+        if(is_position_in_location(x, y, charging_units_location_[cu_num]))
+          return cu_num;
+      }
+      return -1;
+    }
+
     bool first_time_ = true;
     // Timer for the periodic callback (main loop)
     rclcpp::TimerBase::SharedPtr main_loop_timer_;
     // Forklift related variables
-    rclcpp::Publisher<ar_utils::msg::ForkliftState>::SharedPtr pub_forklift_;
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sub_forklift_;
-    ar_utils::msg::ForkliftState forklift_state_;
-    rclcpp::Time last_time_;
-    float forklift_desired_pos_ = 0.0; // Received forklift position command
-    const float FORKLIFT_SPEED_ = 0.03;  // [m/s]
-    const float FORKLIFT_MARGIN_ = 0.005;  // [%] (m)
+    rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr sub_forklift_;
     // Forklift information
-    const float FORKLIFT_DOWN_ = 0.0;  // Down position
-    const float FORKLIFT_UP_ = 0.07;  // Up position
-    bool forklift_up_ = false,
-         forklift_down_ = false;
+    const float FORKLIFT_TIME_ = 0.5;  // Down position
+    // 0 - unknown, 1 - up, 2 - down, 3 - moving up, 4 - moving down
+    forklift_state_t forklift_state_;
+    rclcpp::Time last_forklift_cmd_time_;
 
     // Battery simulation related variables
     sensor_msgs::msg::BatteryState battery_state_;
     std::mutex battery_state_mutex_;
-    rclcpp::Subscription<rosgraph_msgs::msg::Clock>::SharedPtr sub_bat_;
+    rclcpp::TimerBase::SharedPtr battery_timer_;
     rclcpp::Publisher<sensor_msgs::msg::BatteryState>::SharedPtr 
         pub_batttery_state_;
     rclcpp::Service<ar_utils::srv::StartCharging>::SharedPtr svc_charge_;
     // For now we assume a simple model, with a constant battery discharge and
     // charge 
-    const float BATT_DISCHARGE_DELTA_ = 0.0011111;  // Per 0.1 sec 
-    const float BATT_CHARGE_DELTA_ = 0.017;  // Per iteration, ~15xDISCHARGE
+    const float BATT_DISCHARGE_DELTA_ = 0.0005;  // Per 0.1 sec 
+    const float BATT_CHARGE_DELTA_ = 0.010;  // Per iteration
 
     // Robot position and velocity, used to control the charging too
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_vel_;
-    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_real_pose_;
+    message_filters::Subscriber<nav_msgs::msg::Odometry> sub_real_pose_;
     geometry_msgs::msg::Pose2D global_robot_pose_, global_robot_speed_;
     std::mutex pose_vel_mutex_;
+    // Parts location
+    message_filters::Subscriber<nav_msgs::msg::Odometry> sub_parts_location_[NUM_PARTS];
+    std::shared_ptr<message_filters::Synchronizer<
+      message_filters::sync_policies::ApproximateTime<
+        nav_msgs::msg::Odometry, nav_msgs::msg::Odometry, nav_msgs::msg::Odometry,
+        nav_msgs::msg::Odometry, nav_msgs::msg::Odometry, nav_msgs::msg::Odometry>>> sync_;
 
     // Maximum error to consider in desired orientation
     const float MAX_X_OFFSET_ = 0.35; // [m]
-    const float MAX_DIST_ERROR_ = 0.05; // [m]
-    const float MAX_ANG_ERROR_ = 0.07; // [rad] (4º)
+    const float MAX_DIST_ERROR_ = 0.10; // [m]
+    const float MAX_ANG_ERROR_ = 0.14; // [rad] (8º)
     // Maxumum speed to grab/drop the parts
     const float MAX_LIN_SPEED_ = 0.01; // [m/s]
     const float MAX_ANG_SPEED_ = 0.017; // [rad/s] (1º/s)
 
-    // Store the positions of the parts approach pose
+    // Store the positions of the parts
     const float DA_ = 0.0; // Distance to part in [m]
-    const pose_2d input_parts_[NUM_PARTS] =
-      {{2.60, -2.48+DA_, -M_PI_2}, // 1
-       {2.23, -2.48+DA_, -M_PI_2}, // 2
-       {1.86, -2.48+DA_, -M_PI_2}, // 3
-       {1.49, -2.48+DA_, -M_PI_2}, // 4
-       {1.12, -2.48+DA_, -M_PI_2}};// 5
-    const pose_2d process_parts_[NUM_PMAN] =
-      {{1.10-DA_, 0.18, 0.0}, // R1 1
-       {1.46+DA_, 0.18, M_PI}, // R2 2
-       {1.10-DA_, -0.18, 0.0}, // R3 3
-       {1.46+DA_, -0.18, M_PI}, // R4 4
-       {-1.12+DA_, 0.18, M_PI}, // L1 5
-       {-1.48-DA_, 0.18, 0.0}, // L2 6
-       {-1.12+DA_, -0.18, M_PI}, // L3 7
-       {-1.48-DA_, -0.18, 0.0}};// L4 8
-    const pose_2d output_parts_[NUM_PARTS] =
-      {{-2.62, 2.50-DA_, -M_PI_2}, // 1
-       {-2.25, 2.50-DA_, M_PI_2}, // 2
-       {-1.88, 2.50-DA_, M_PI_2}, // 3
-       {-1.51, 2.50-DA_, M_PI_2}, // 4
-       {-1.14, 2.50-DA_, M_PI_2}};// 5
-    const pose_2d charging_pose_ = {0.0, -2.0, -M_PI};
+    const point_2d  input_parts_[NUM_PARTS] =
+      {{-4.90, -7.00+DA_}, // 1 (left)
+       {-2.45, -7.00+DA_}, // 2
+       {0.00, -7.00+DA_}, // 3
+       {2.45, -7.00+DA_}, // 4
+       {4.90, -7.00+DA_}};// 5 (right)
+    const point_2d process_parts_[NUM_PMAN] =
+      {{-2.45, 2.00-DA_}, // Left 1
+       {0.00, 2.00-DA_}, // Center 2
+       {2.45, 2.00-DA_}};// Right 8
+    const point_2d output_parts_[NUM_PARTS] =
+      {{-6.50, 7.40-DA_}, // 1
+       {-3.00, 7.40-DA_}, // 2
+       {0.50, 7.40-DA_}, // 3
+       {4.30, 7.40-DA_}, // 4
+       {7.00, 7.40-DA_}};// 5
+
+    // Store the location of the processing units
+    const Rect processing_units_location_[NUM_PMAN] =
+      {Rect({-3.70, 2.45}, {-1.30, 0.50}), // Left processing unit
+       Rect({-1.30, 2.45}, {1.20, 0.50}),  // Center processing unit
+       Rect({1.20, 2.45}, {3.50, 0.50})};  // Right processing unit
+
+    // Store the location of the delivery units
+   const Rect delivery_units_location_[NUM_DUNITS] =
+      {Rect({-5.90, 2.45}, {-3.75, 0.50}), // Left delivery unit
+       Rect({3.60, 2.45}, {6.00, 0.50})};  // Right delivery unit
+    /*const Rect delivery_units_location_[NUM_DUNITS] =
+      {Rect({-8.00, 8.00}, {-4.90, 5.00}), // Left delivery unit
+       Rect({-4.90, 8.00}, {-1.20, 5.00}), // Center left delivery unit
+       Rect({-1.20, 8.00}, {2.50, 5.00}),  // Center delivery unit
+       Rect({2.50, 8.00}, {6.15, 5.00}),   // Center right delivery unit
+       Rect({6.15, 8.00}, {8.00, 5.00})};  // Right delivery unit
+    */
+    // Store the location of the chrging units
+    const Rect charging_units_location_[NUM_CUNITS] =
+      {Rect({-5.05, -2.05}, {-4.55, -2.55}), // Left charging unit
+       Rect({-0.25, -2.55}, {0.25, -3.05}),  // Center charging unit
+       Rect({4.55, -1.75}, {5.05, -2.25})};  // Right charging unit
 
     // Parts status
     rclcpp::Publisher<std_msgs::msg::UInt8MultiArray>::SharedPtr
