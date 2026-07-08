@@ -29,6 +29,7 @@ setup(
             'task_fsm_yasmin = lw2.task_fsm_yasmin:main',
             'ekf_icp_localization = lw2.ekf_icp_localization:main',
             'path_navigation = lw2.path_navigation:main',
+            'astar_planner = lw2.astar_planner:main',
             'action_move2pos = lw2.ActionMove2Pos:main',
             'action_move2pose = lw2.ActionMove2Pose:main',
             'action_move_forklift = lw2.ActionMoveForklift:main',
