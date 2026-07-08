@@ -53,8 +53,10 @@ def generate_launch_description():
     sl.declare_arg('namespace', 'robot_0',
                    description='Top-level robot namespace.')
     namespace = sl.arg('namespace')
+    # CODE WAS ADDED HERE (use the lw2 parameters file instead of the tw10
+    # one, so that the lw2 nodes read their own configuration)
     sl.declare_arg(
-        'params_file', sl.find('tw10', 'params.yaml', 'config'),
+        'params_file', sl.find('lw2', 'params.yaml', 'config'),
         description='(Optional) Complete path to the parameters file')
 
     # Get the YAML configuration file
@@ -104,7 +106,11 @@ def generate_launch_description():
             namespace=namespace,
             output='screen',
             emulate_tty=True,  # https://github.com/ros2/launch/issues/188
-            parameters={'yaml_filename': sl.find('tw04', 'map.yaml', 'config'),
+            # CODE WAS ADDED HERE (use the map built in LW1, which is the
+            # correct 16x16 factory map and already includes the
+            # configuration space needed by the A* planner; the tw04 map
+            # was from a different world)
+            parameters={'yaml_filename': sl.find('lw1', 'map.yaml', 'config'),
                         'use_sim_time': use_sim_time})
 
         # If we are using the map server, run the lifecycle node manager
@@ -157,13 +163,27 @@ def generate_launch_description():
                     namespace, rewritten_params_file, use_sim_time)
 
     # Path navigation node
+    # CODE WAS ADDED HERE (navigation is now started by default, since the
+    # task uses the A* planner + path navigation from our LW1 work)
     sl.declare_arg(
-        'run-navigation', False,
+        'run-navigation', True,
         description='If True, run the path navigation node')
     with sl.group(if_arg='run-navigation'):
         sl.node(package='lw2',
                 executable='path_navigation',
                 name='lw2_path_navigation',
+                namespace=namespace,
+                output='screen',
+                emulate_tty=True,
+                parameters=[rewritten_params_file,
+                            {'use_sim_time': use_sim_time}])
+
+        # CODE WAS ADDED HERE
+        # A* path planner (reused from our LW1 work): receives a goal pose
+        # in the goal_pose topic and publishes the planned path in the path
+        # topic, which is then followed by the path navigation node.
+        sl.node(package='lw2',
+                executable='astar_planner',
                 namespace=namespace,
                 output='screen',
                 emulate_tty=True,
