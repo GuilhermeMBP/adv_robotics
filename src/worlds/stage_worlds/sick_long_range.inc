@@ -10,6 +10,17 @@ define sicksensor sensor
   color_rgba [ 0 0 1 0.15 ]
 )
 
+define sicksensor360 sensor
+(				
+  # factory settings for LMS200	
+  range [ 0.0 20.0 ]
+	pose [ 0 0 0.1 0 ]
+  fov 360
+  samples 360
+  #samples 90 # still useful but much faster to compute
+  color_rgba [ 0 0 1 0.15 ]
+)
+
 define sickcommon ranger
 (
   color "blue"
@@ -69,6 +80,8 @@ define fancysickbase sickcommon
    color "gray10"
   )
 )
+
+define sicklaser360 sickbase ( sicksensor360() )
 
 define sicklaser sickbase ( sicksensor() )
 

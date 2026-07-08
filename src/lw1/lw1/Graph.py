@@ -111,12 +111,15 @@ class Node:
         # Down
         self.actions_.append(Action(0, -1))
         
+
+        #-----------------------------------------------------------
         # the actions left for connectivity 8
         self.actions_.append(Action(1, 1))
         self.actions_.append(Action(-1, 1))
         self.actions_.append(Action(1, -1))
         self.actions_.append(Action(-1, -1))
 
+        #-----------------------------------------------------------
 
         # Add all actions as unborn children
         self.unborn_children_.extend(self.actions_)
@@ -148,16 +151,31 @@ class Node:
                (self.graph_.map_[y, x] < 0):
                 continue
 
+
+
+
+
+
+#--------------------------------------------------------------------
+
             # We have a new map point to explore in the future, this will be a
             # new child if not generated previously with lower cost
             map_point = MapPoint(x, y)
             # Verifica se é um movimento diagonal
+            #(1,1) e (-1,-1) são diagonais
             if child_action.x != 0 and child_action.y != 0:
                 step_cost = 1.414  # Raiz quadrada de 2
             else:
                 step_cost = 1.0    # Movimento normal (Cima/Baixo/Esq/Dir)
                 
             child_cost = (self.cost_ + step_cost)
+
+#--------------------------------------------------------------------
+
+
+
+
+
 
             # Check if the new position was already processed
             if (map_point.label in self.graph_.nodes_list_):

@@ -132,7 +132,7 @@ class Trilateration(Node):
         # Compute r = inv(A'*A)*A'*b
        # r = np.linalg.pinv(A) @ b
 
-
+#----------------------------------------------------------------------------------------------
 # Código de calculo das matrizes e posição x e y:
         n = msg.num_markers
 
@@ -154,10 +154,16 @@ class Trilateration(Node):
             # Distância entre os dois beacons
             dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
-            # Distância do beacon 1 ao ponto médio entre as interseções
+            # Distância do beacon 1 ao ponto médio entre becons
+            #duas equações e duas incógnitas isolar "a" e "h"
+            #d1^2=a^2+h^2 (trinagulo becon 1)
+            #d2^2=(dist−a)^2+h^2 (triangulo becon 2)
+            #d1^2-d2^2=a^2+h^2-(dist−a)^2-h^2 .... isolar "a":
             a = (d1**2 - d2**2 + dist**2) / (2 * dist)
 
             # Altura do triângulo (distância do ponto médio aos pontos de interseção)
+            #força o valor a ser no mínimo 0 para evitar problemas numéricos, para nao dar erro ao fazer a raiz
+            #h**2 = d1**2 - a**2 
             h = np.sqrt(max(0.0, d1**2 - a**2))
 
             # Ponto médio entre as duas interseções
@@ -176,6 +182,7 @@ class Trilateration(Node):
             last_x = self.robot_estimated_pose.x
             last_y = self.robot_estimated_pose.y
 
+            #distacia dod pontos á ultima posição conhecida
             dist1 = (px1 - last_x)**2 + (py1 - last_y)**2
             dist2 = (px2 - last_x)**2 + (py2 - last_y)**2
 
@@ -188,16 +195,33 @@ class Trilateration(Node):
 
 
             #Orientação (código igual ao de baixo):
+            #variaveis para media do angulo
             sum_sin = 0.0
             sum_cos = 0.0
             for i in range(2):
+                # Dados do marco atual
                 xi = beacons_wpos[msg.id[i]-1].x
                 yi = beacons_wpos[msg.id[i]-1].y
-                bearing_i = msg.bearing[i]
+                #angulo da frente do robô para o beacon, medido pelo sensor
+                bearing_i = msg.bearing[i] 
+
+                # Ângulo global do robô para o marco
+                #já se calculou posição e sabe-se a posição do beacon
+                #usa-se arctan para calcular qual o angulo dessa direção do eixo x global até o beacon
                 angle_to_beacon = np.arctan2(yi - est_y, xi - est_x)
+
+                # A orientação do robô é a diferença entre o ângulo global
+                # e o ângulo que o sensor mediu 
                 theta_i = angle_to_beacon - bearing_i
+
+                # Acumula em cartesianas para evitar
+                # o problema da média de ângulos (ex: média de 179° e -179°)
+                #cos(-180) e cos(180) são ambos -1 (direita) eliminando a descontinuidade
                 sum_sin += np.sin(theta_i)
                 sum_cos += np.cos(theta_i)
+
+                # Obter o ângulo médio final
+                #usa-se arctan2 porque este vê os sinais individuais, arctan normal se for 3Q tem erro
             est_theta = np.arctan2(sum_sin / 2, sum_cos / 2)
 
             # Debug para o caso de 2 beacons
@@ -262,6 +286,7 @@ class Trilateration(Node):
                 
                 # Acumula em cartesianas para evitar
                 # o problema da média de ângulos (ex: média de 179° e -179°)
+                #cos(-180) e cos(180) são ambos -1 (direita) eliminando a descontinuidade
                 sum_sin += np.sin(theta_i)
                 sum_cos += np.cos(theta_i) 
 
@@ -288,12 +313,19 @@ class Trilateration(Node):
 
 
         
-
+#Debug
 # Converte o theta real de radianos para graus para ser mais fácil de ler
         real_theta_deg = np.rad2deg(self.robot_real_pose.theta)
         est_theta_deg = np.rad2deg(est_theta)
 
         self.get_logger().info(f'COMPARAÇÃO THETA: Calculado={est_theta_deg:.2f}°, Real={real_theta_deg:.2f}°')
+
+
+#-----------------------------------------------------------------------------------------
+
+
+
+
 
 
 

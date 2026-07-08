@@ -172,8 +172,15 @@ class BasicWaypointPathNavigation(Node):
                        (robot_pose.y-self.curr_target.y)**2
             # If the distance is small enough, proceed to the next target
             if(distance < self.min_distance):
-                # If there are not more targets, stop the robot and return
+
+
+
+ #------------------------------------------------------------------------------  
+
+                # Se está na ultima pose
                 if self.curr_target_idx == self.num_targets-1:
+
+                 
                     # Stop the robot
                     #vel_cmd = Twist()
                     #vel_cmd.angular.z = 0.0
@@ -185,6 +192,8 @@ class BasicWaypointPathNavigation(Node):
                         self.global_path[self.curr_target_idx].pose.orientation)
                     # Cálculo do ângulo entre a orientação atual do robô e a orientação desejada da meta
                     angle_to_goal_orientation = goal_orientation - robot_pose.theta 
+
+                    #vemos se a descrepancia é muito grande
                     if abs(angle_to_goal_orientation) > radians(5):
                         # Rotate the robot
                         kp_ang_vel = self.get_parameter(
@@ -197,6 +206,9 @@ class BasicWaypointPathNavigation(Node):
                         self.vel_pub.publish(vel_cmd)
                         return # Damos return aqui para não continuar a exceução para o próximo target (já estamos no último)
                     else:
+
+                        # código do prof
+                        #vai rodar o robô até que a diferença entre a orientação atual e a desejada seja menor que 5 graus, para evitar que o robô fique oscilando em torno da posição final
                         # Stop the robot
                         vel_cmd = Twist()
                         vel_cmd.angular.z = 0.0
@@ -208,6 +220,12 @@ class BasicWaypointPathNavigation(Node):
                         self.get_logger().info('Finished path navigation')
                         return
                     
+                    #------------------------------------------------------------------------------   
+
+
+
+
+                  
                 # Else, proceed with the next target
                 self.curr_target_idx += 1
                 self.get_logger().info(
@@ -251,6 +269,9 @@ class BasicWaypointPathNavigation(Node):
         vel_cmd.angular.z = ang_vel
         vel_cmd.linear.x = lin_vel
         self.vel_pub.publish(vel_cmd)
+        
+
+
 
 def main(args=None):
     '''
