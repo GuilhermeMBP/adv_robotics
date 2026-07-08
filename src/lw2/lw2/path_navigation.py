@@ -133,10 +133,13 @@ class BasicWaypointPathNavigation(Node):
             # Store an internal copy of the path
             self.global_path = msg.poses
             self.num_targets = len(msg.poses)
-            # Start in the first pose of the path
-            if (self.curr_target_idx is None) or \
-               (self.curr_target_idx == self.num_targets-1):
-                self.curr_target_idx = 0
+            # CODE WAS ADDED HERE
+            # Always start in the first pose of the path. Each new path is
+            # planned from the current robot position, so we must restart
+            # from its first waypoint. Keeping the old index (as before)
+            # crashed with an IndexError when a new, shorter path arrived
+            # while the previous one was still being followed.
+            self.curr_target_idx = 0
 
             # Setup odometry or pose subscriber, according to USE_ODOM
             if self.pose_sub is not None:
@@ -181,8 +184,18 @@ class BasicWaypointPathNavigation(Node):
             # Compute the squared distance to the target
             distance = (robot_pose.x-self.curr_target.x)**2 + \
                        (robot_pose.y-self.curr_target.y)**2
+            # CODE WAS ADDED HERE
+            # The distance above is squared, so min_distance = 0.08
+            # corresponds to ~0.28 m. That is good for switching between
+            # intermediate waypoints without stopping, but too coarse for
+            # the final stop, so we use a tighter value (~0.10 m) for the
+            # last waypoint of the path.
+            if self.curr_target_idx == self.num_targets-1:
+                accept_distance = 0.01
+            else:
+                accept_distance = self.min_distance
             # If the distance is small enough, proceed to the next target
-            if (distance < self.min_distance):
+            if (distance < accept_distance):
                 # If there are not more targets, stop the robot and return
                 if self.curr_target_idx == self.num_targets-1:
                     # Stop the robot

@@ -55,7 +55,12 @@ from rclpy.executors import MultiThreadedExecutor
 import ros2_numpy as rnp
 
 # Our functions
-from tw09.ExtendedKalmanFilter import ExtendedKalmanFilter
+# CODE WAS ADDED HERE (use the lw2 local copy instead of the tw09 one)
+from lw2.ExtendedKalmanFilter import ExtendedKalmanFilter
+# CODE WAS ADDED HERE
+# World positions of the 56 reflective beacons, obtained in LW1. These will
+# be used as the ICP map cloud instead of the occupancy grid walls.
+from lw1.lw1_landmarks_locations import beacons_wpos
 from ar_py_utils.utils import cell2meter, quaternionToYaw, rpyToQuaternion
 import ar_py_utils.LocalFrameWorldFrameTransformations as lfwft
 
@@ -100,6 +105,19 @@ class EKFICPLocalization(Node):
 
         # Robot name
         self.robot_name = self.get_namespace()[1:]
+
+        # CODE WAS ADDED HERE
+        # Laser intensity threshold used to keep only the reflective beacons
+        # (in the simulator the reflectors return an intensity of 0.95,
+        # while regular walls return lower values).
+        self.MIN_INTENSITY = 0.9
+        # Minimum number of sensed beacon points required to run the
+        # ICP-based update step (with less than 2 points the ICP rotation
+        # estimate is not defined).
+        self.MIN_ICP_POINTS = 2
+        # Maximum accepted distance between a sensed point and its map
+        # correspondence. Larger matches are discarded as outliers.
+        self.MAX_CORRESPONDENCE_DIST = 1.5
 
         # The actual Extended Kalman Filter
         self.ekf = ExtendedKalmanFilter()
@@ -356,35 +374,18 @@ class EKFICPLocalization(Node):
         # We will use this frame_id as our map frame id
         self.base_frame_id = msg.header.frame_id
 
-        ''' Initilize point cloud based on the received map '''
-        # Get total number of points in the original map (this number will be
-        # the size of the cloud).
-        # Obstacles have value 100 in original map. We assume that any value
-        # above or equal to 50 is an obstacle.
-        num_map_points = np.count_nonzero(occgrid >= 50)
-        # Prepare our cloud map with the correct number of points
-        self.map_cloud = np.empty([num_map_points, 2])
-        # Go through the image and store all the walls points in the cloud
-        # NOTE: this 2 for cycles could be vectorized into few instructions for
-        # increased execution speed. I leave it as it is for readibility
-        i = 0
-        for y in range(occgrid.shape[0]):
-            for x in range(occgrid.shape[1]):
-                # If this pixel is >= 500, then it is a wall point. Add it to
-                # the cloud.
-                if occgrid[y, x] >= 50:
-                    pt = cell2meter(lfwft.Point2D(x=x, y=y), msg.info.origin,
-                                    msg.info.resolution)
-                    self.map_cloud[i, 0] = pt.x
-                    self.map_cloud[i, 1] = pt.y
-                    i = i + 1
-        # Sanity check: the number of read points must be equal to the number
-        # of expected points
-        if i != num_map_points:
-            self.get_logger().error(
-                 f'Expected {num_map_points} points but got {i} points')
-            self.lock.release()
-            return  # No sense in continuing
+        # CODE WAS ADDED HERE
+        ''' Initialize the point cloud with the reflective beacons positions
+            obtained in LW1 (LW2, Section 2: we do NOT use the occupancy
+            grid walls, only the 56 reflective beacons, since the sensed
+            cloud will only contain the laser points with high intensity).
+            The occupancy grid is still received but only used for the map
+            frame_id (and visualization in RViz).
+        '''
+        self.map_cloud = np.array([[pt.x, pt.y] for pt in beacons_wpos])
+        self.get_logger().info(
+            f'Using {self.map_cloud.shape[0]} reflective beacons from LW1 '
+            'as the ICP map cloud.')
 
         # Build KD-Tree for nearest neighbours search using our cloud map
         #  points
@@ -499,18 +500,38 @@ class EKFICPLocalization(Node):
         # Build sensed point cloud
         # This could be vectorized for increased speed. It is kept as it is for
         # increased readability.
+        # CODE WAS ADDED HERE
+        # LW2: keep only the laser points corresponding to the reflective
+        # beacons, i.e., those with a high intensity value (the reflectors
+        # return an intensity close to 1, while walls return lower values).
         angle = laser_msg.angle_min
         # Compute the number of elements
+        # CODE WAS ADDED HERE (added the intensity condition to the count)
         num_sensed_points = (
-            np.logical_and(np.array(laser_msg.ranges) > laser_msg.range_min,
-                           np.array(laser_msg.ranges) < laser_msg.range_max)
+            np.logical_and(
+                np.logical_and(
+                    np.array(laser_msg.ranges) > laser_msg.range_min,
+                    np.array(laser_msg.ranges) < laser_msg.range_max),
+                np.array(laser_msg.intensities) >= self.MIN_INTENSITY)
                           ).sum()
+        # CODE WAS ADDED HERE
+        # If we see less than 2 beacons the ICP is not reliable, so we only
+        # run the prediction step this time.
+        if num_sensed_points < self.MIN_ICP_POINTS:
+            self.get_logger().warn(
+                f'Only {num_sensed_points} beacon(s) visible, '
+                'skipping the update step.')
+            self.createAndPublishPose(odom_msg.header.stamp)
+            self.lock.release()
+            return
         sensed_cloud_polar = np.empty((num_sensed_points, 2))
         i = 0
         j = 0
         while angle <= laser_msg.angle_max:
+            # CODE WAS ADDED HERE (added the intensity condition)
             if (laser_msg.ranges[i] > laser_msg.range_min) and \
-               (laser_msg.ranges[i] < laser_msg.range_max):
+               (laser_msg.ranges[i] < laser_msg.range_max) and \
+               (laser_msg.intensities[i] >= self.MIN_INTENSITY):
                 # Store values in polar coordinates, as given by the sensor
                 sensed_cloud_polar[j, 0] = laser_msg.ranges[i]
                 sensed_cloud_polar[j, 1] = angle
@@ -568,14 +589,28 @@ class EKFICPLocalization(Node):
 
             # Compute correspondence using the KDTree nearest neighbour
             dists, indexes = self.kdtree.query(sensed_cloud)
+
+            # CODE WAS ADDED HERE
+            # Discard outlier correspondences (sensed beacons whose nearest
+            # map beacon is too far away, which would drag the ICP towards
+            # a wrong solution). If not enough valid pairs remain, stop
+            # iterating and keep the estimate we have so far.
+            valid = dists <= self.MAX_CORRESPONDENCE_DIST
+            if valid.sum() < self.MIN_ICP_POINTS:
+                self.get_logger().warn(
+                    'Not enough valid ICP correspondences '
+                    f'({valid.sum()}), stopping the ICP iterations.')
+                break
+            valid_sensed = sensed_cloud[valid, :]
             # Build vector with only the correspondant pairs.
             # Once again, this could be vectorized for increased speed.
-            correspondences = self.map_cloud[indexes[:], :]
+            correspondences = self.map_cloud[indexes[valid], :]
 
             # Compute the translation as the difference between the center of
             # mass of each set of points in the correspondence.
             # Compute mean along the rows (axis 0)
-            mean_sensed_cloud = np.mean(sensed_cloud, 0, keepdims=True)
+            # CODE WAS ADDED HERE (use only the valid/inlier pairs)
+            mean_sensed_cloud = np.mean(valid_sensed, 0, keepdims=True)
             mean_correspondences = np.mean(correspondences, 0, keepdims=True)
 
             # Debug
@@ -593,7 +628,9 @@ class EKFICPLocalization(Node):
             #  3. Computing the rotation as R = VU'
             W = np.zeros((2, 2))
             for i in range(correspondences.shape[0]):
-                W = W + (sensed_cloud[i, :] - mean_sensed_cloud).T @ \
+                # CODE WAS ADDED HERE (use only the valid/inlier pairs, so
+                # that each sensed point is paired with its correspondence)
+                W = W + (valid_sensed[i, :] - mean_sensed_cloud).T @ \
                     (correspondences[i, :] - mean_correspondences)
             U, S, Vt = np.linalg.svd(W)
             # Debug
@@ -629,14 +666,18 @@ class EKFICPLocalization(Node):
                     'Total rotation angle [degrees]: ' +
                     f'{degrees(atan2(rotation[1, 0], rotation[0, 0]))}')
                 # Publish debug information
+                # CODE WAS ADDED HERE (valid_sensed instead of sensed_cloud,
+                # so that the debug pairs stay aligned after the outlier
+                # filtering)
                 self.publishDebugInformation(odom_msg.header.stamp,
-                                             self.map_cloud, sensed_cloud,
+                                             self.map_cloud, valid_sensed,
                                              mean_correspondences,
                                              mean_sensed_cloud,
                                              correspondences)
 
             # Compute RMS error (before last computed transformation)
-            sqr_dists = dists**2  # Compute the square of the distances
+            # CODE WAS ADDED HERE (compute the error only over the inliers)
+            sqr_dists = dists[valid]**2  # Compute the square of the distances
             result = np.mean(sqr_dists)  # Compute the mean
             curr_error = sqrt(result)  # Compute the square root
             # Debug
@@ -667,6 +708,17 @@ class EKFICPLocalization(Node):
              f'{totalTranslation[0, 0]:.2f} {totalTranslation[1, 0]:.2f} ' +
              f'{degrees(atan2(totalRotation[1, 0], totalRotation[0, 0])):.2f}')
             self.icpfile.write('----------------------------')
+
+        # CODE WAS ADDED HERE
+        # If the ICP loop ended without a single valid iteration (broke on
+        # the first pass due to lack of valid correspondences), there is no
+        # observation to feed the EKF with, so skip the update step.
+        if not np.isfinite(last_error):
+            self.get_logger().warn(
+                'ICP produced no valid result, skipping the update step.')
+            self.createAndPublishPose(laser_msg.header.stamp)
+            self.lock.release()
+            return
 
         ''' Run the actual step 2 of the EKF, given the result of the above ICP
             run. For the error, we will also consider the result above. '''

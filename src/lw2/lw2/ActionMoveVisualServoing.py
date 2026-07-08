@@ -34,6 +34,7 @@ position and bearing are smaller than a the desired values.
 
 # Non-ROS modules
 import os
+from math import radians  # CODE WAS ADDED HERE
 from threading import Lock, Event
 import functools
 
@@ -43,9 +44,13 @@ from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
+# CODE WAS ADDED HERE (needed for the blind approach deadline)
+from rclpy.duration import Duration
 
 # Our modules
 from ar_utils.action import MoveVisualServoing
+from ar_py_utils.utils import clipValue  # CODE WAS ADDED HERE
+from geometry_msgs.msg import Twist  # CODE WAS ADDED HERE
 from markers_msgs.msg import Markers
 
 # This action name (strip the '.py' preffix)
@@ -72,6 +77,22 @@ class MoveVisualServoingActionServer(Node):
         # Robot navigation/motion related constants and variables
         self.MAX_LIN_VEL = 1.0  # Maximum linear speed [m/s]
         self.MAX_ANG_VEL = 1.57  # Maximu angular speed (90°/s) [rad/s]
+
+        # CODE WAS ADDED HERE
+        # Visual servoing control parameters (proportional controller gains
+        # and the maximum bearing above which the robot rotates in place)
+        self.Kp_lin_vel = 0.5
+        self.Kp_ang_vel = 1.5
+        self.max_angle_to_target = radians(30.0)
+        # Blind final approach (markers not visible below this range)
+        self.blind_zone_range = 0.70   
+        self.blind_lin_vel = 0.15      
+
+        # CODE WAS ADDED HERE
+        # Velocity publisher and reusable Twist message (the original file
+        # used self.vel_pub without ever creating it)
+        self.vel_cmd = Twist()
+        self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 1)
 
         # Markers subscriber (to be used later on)
         self.sub_markers = None
@@ -124,6 +145,11 @@ class MoveVisualServoingActionServer(Node):
             ', and maximum bearing' +
             f' {goal_handle.request.max_distance:0.2f}]. [m]')
 
+        # CODE WAS ADDED HERE
+        # Reset detected markers so we don't reuse stale data from a
+        # previous goal
+        self.curr_detected_markers = None
+
         # Wait for a confimation (trigger), either due to the goal having
         # succeeded, or the goal having been cancelled.
         trigger_event = Event()  # Flag is intially set to False
@@ -142,6 +168,15 @@ class MoveVisualServoingActionServer(Node):
 
         # Used for feedback purposes
         feedback = MoveVisualServoing.Feedback()
+
+        last_range = None
+        last_bearing = None
+        # CODE WAS ADDED HERE
+        # Deadline for the blind final approach (None while not blind).
+        # We cannot simply sleep while moving, because the simulator stops
+        # the robot if no velocity command is received for 0.2 s, so we keep
+        # publishing in the loop until this deadline is reached.
+        blind_end_time = None
 
         while rclpy.ok():
             # Wait for new information to arrive
@@ -180,43 +215,143 @@ class MoveVisualServoingActionServer(Node):
 
                 ''' Control the robot velocity to reach the desired goal '''
 
-                # Determine the marker to approach
-                # --> CODE HERE!
-
-                if False:
-                    # If the maker is closer than the desired distance,and the
-                    # angle is lower than the desired angle, return
-                    # successfully.
-
-                    # --> CODE HERE
-
-                    # No need for the callback anymore
+                # CODE WAS ADDED HERE
+                # =====================================================
+                # STEP 1: Determine the marker to approach
+                # Strategy: choose the closest marker (smallest range).
+                # If no markers are visible, stop and abort (lost target).
+                # =====================================================
+                # CODE WAS ADDED HERE
+                # If we are in the blind final approach, keep sending the
+                # forward velocity on every loop iteration (the markers
+                # messages keep arriving with 0 markers, which keeps this
+                # loop running). When the deadline is reached, we stop and
+                # finish with success.
+                if blind_end_time is not None:
+                    if self.get_clock().now() < blind_end_time:
+                        self.vel_cmd.linear.x = self.blind_lin_vel
+                        self.vel_cmd.angular.z = 0.0
+                        self.vel_pub.publish(self.vel_cmd)
+                        continue  # Keep going until the deadline
+                    # Deadline reached: stop the robot and succeed
+                    self.vel_cmd.linear.x = 0.0
+                    self.vel_cmd.angular.z = 0.0
+                    self.vel_pub.publish(self.vel_cmd)
                     if self.sub_markers is not None:
                         self.destroy_subscription(self.sub_markers)
                         self.sub_markers = None
+                    goal_handle.succeed()
+                    self.get_logger().info(
+                        f'{ACTION_NAME} succeeded (blind phase)!')
+                    return MoveVisualServoing.Result(success=True)
+
+                markers = self.curr_detected_markers
+                if (markers is None) or (markers.num_markers == 0):
+                    # Lost close and aligned? Expected: finish blindly.
+                    if (last_range is not None) and \
+                       (last_range < self.blind_zone_range) and \
+                       (abs(last_bearing) < goal_handle.request.max_bearing):
+                        # CODE WAS ADDED HERE
+                        # Compute how long we need to advance the remaining
+                        # distance at constant speed, and store the deadline.
+                        # The actual movement is done in the loop above.
+                        blind_dist = \
+                            last_range - goal_handle.request.max_distance
+                        blind_end_time = self.get_clock().now() + \
+                            Duration(seconds=blind_dist / self.blind_lin_vel)
+                        continue
+                    # Lost far away or misaligned: real failure.
+                    self.vel_cmd.linear.x = 0.0
+                    self.vel_cmd.angular.z = 0.0
+                    self.vel_pub.publish(self.vel_cmd)
+                    if self.sub_markers is not None:
+                        self.destroy_subscription(self.sub_markers)
+                        self.sub_markers = None
+                    goal_handle.abort()
+                    self.get_logger().warn(
+                        f'{ACTION_NAME}: lost markers, aborting.')
+                    return MoveVisualServoing.Result(success=False)
+
+                # Find index of the closest marker
+                closest_idx = 0
+                closest_range = markers.range[0]
+                for i in range(1, markers.num_markers):
+                    if markers.range[i] < closest_range:
+                        closest_range = markers.range[i]
+                        closest_idx = i
+
+                target_range = markers.range[closest_idx]
+                target_bearing = markers.bearing[closest_idx]
+                
+                # Remember last valid detection (used by the blind final approach)
+                last_range = target_range
+                last_bearing = target_bearing
+
+                # CODE WAS ADDED HERE
+                # =====================================================
+                # STEP 2: Check success condition
+                # Both range and |bearing| must be within the goal limits.
+                # =====================================================
+                if (target_range < goal_handle.request.max_distance) and \
+                   (abs(target_bearing) < goal_handle.request.max_bearing):
                     # Stop the robot
                     self.vel_cmd.angular.z = 0.0
                     self.vel_cmd.linear.x = 0.0
                     self.vel_pub.publish(self.vel_cmd)
-                    # We are done!
+                    # Clean up
+                    if self.sub_markers is not None:
+                        self.destroy_subscription(self.sub_markers)
+                        self.sub_markers = None
                     goal_handle.succeed()
-                    self.get_logger().info(f'{ACTION_NAME} has succeeded!')
+                    self.get_logger().info(
+                        f'{ACTION_NAME} has succeeded! '
+                        f'(range={target_range:.2f}, '
+                        f'bearing={target_bearing:.2f})')
                     return MoveVisualServoing.Result(success=True)
 
-                # Otherwise, compute the linear and angular velocity to
-                # approach the closest marker
+                # CODE WAS ADDED HERE
+                # =====================================================
+                # STEP 3: Compute velocities using P controllers
+                # - Angular velocity always tries to align with the marker
+                # - Linear velocity only kicks in when reasonably aligned
+                #   (same strategy as ActionMove2Pos for consistency)
+                # =====================================================
+                ang_vel = self.Kp_ang_vel * target_bearing
 
-                # --> CODE HERE
+                if abs(target_bearing) < self.max_angle_to_target:
+                    lin_vel = self.Kp_lin_vel * target_range
+                    # CODE WAS ADDED HERE
+                    # Near the part, limit the speed to the blind approach
+                    # speed. This makes the speed at the moment the markers
+                    # are lost always the same, so the distance travelled
+                    # between the last detection and the start of the blind
+                    # phase is constant (instead of varying with each run,
+                    # which made the pickup inconsistent).
+                    if target_range < self.blind_zone_range:
+                        lin_vel = min(lin_vel, self.blind_lin_vel)
+                else:
+                    lin_vel = 0.0  # rotate in place until aligned enough
 
-                # Publish velocty commands
+                # Clip to safe limits
+                lin_vel = clipValue(lin_vel,
+                                    -self.MAX_LIN_VEL, self.MAX_LIN_VEL)
+                ang_vel = clipValue(ang_vel,
+                                    -self.MAX_ANG_VEL, self.MAX_ANG_VEL)
 
-                # --> CODE HERE
+                # CODE WAS ADDED HERE
+                # =====================================================
+                # STEP 4: Publish velocity commands
+                # =====================================================
+                self.vel_cmd.linear.x = lin_vel
+                self.vel_cmd.angular.z = ang_vel
+                self.vel_pub.publish(self.vel_cmd)
 
-                # Publish feedback (current distance and bearing to the marker
-                # being approached).
-                # --> CODE HERE: UPDATE THESE LINES GIVEN YOUR CODE ABOVE
-                feedback.distance = 0.0
-                feedback.bearing = 0.0
+                # CODE WAS ADDED HERE
+                # =====================================================
+                # STEP 5: Publish feedback with current values
+                # =====================================================
+                feedback.distance = target_range
+                feedback.bearing = target_bearing
                 goal_handle.publish_feedback(feedback)
 
     def markersCallback(self, msg: Markers, goal_handle, trigger_event):

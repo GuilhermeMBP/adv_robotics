@@ -29,18 +29,29 @@
 
 
 '''@package docstring
-Execute a simple task, formed by the following sequential execution:
-  - Action Move2Pos to position (0, -2) [m]
-  - Action Rotate2Angle to orientation -90 deg
-  - Action Stop
-  - Action Recharge to 90%
+Execute the LW2 task: transport parts from the input warehouse, through a
+processing unit, to a delivery unit, using the forklift and visual servoing,
+while managing the battery level.
   Use yasmin to implement the FSM: https://github.com/uleroboticsgroup/yasmin
 '''
 
+# CODE WAS ADDED HERE (needed to wait for the parts processing)
+import time
+# CODE WAS ADDED HERE (needed for the rotation states orientations and the
+# navigation arrival check)
+from math import pi, sqrt
+
 # ROS API
 from geometry_msgs.msg import Point
+# CODE WAS ADDED HERE (needed for the backup motion after dropping a part
+# and for publishing the navigation goals to the A* planner)
+from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
+# CODE WAS ADDED HERE (needed to check if the robot is stopped)
+from nav_msgs.msg import Odometry
 import rclpy
 from sensor_msgs.msg import BatteryState
+# CODE WAS ADDED HERE (parts_sensor topic message type)
+from std_msgs.msg import UInt8MultiArray
 
 # Yasmin FSM execution
 import yasmin
@@ -66,10 +77,178 @@ class RobotBlackboardSynchronizer:
         self.blackboard = blackboard
         self.battery_state_subscriber = self.node.create_subscription(
             BatteryState, 'battery/state', self.batteryLevelCallback, 4)
+        # CODE WAS ADDED HERE (we also need the parts states in the FSM)
+        self.parts_sensor_subscriber = self.node.create_subscription(
+            UInt8MultiArray, 'parts_sensor', self.partsSensorCallback, 4)
+        # CODE WAS ADDED HERE (the estimated pose and the speed are needed
+        # to know when a navigation goal was reached)
+        self.pose_subscriber = self.node.create_subscription(
+            PoseWithCovarianceStamped, 'pose', self.poseCallback, 1)
+        self.odom_subscriber = self.node.create_subscription(
+            Odometry, 'odom', self.odomCallback, 1)
 
     def batteryLevelCallback(self, msg: BatteryState):
         """Store the battery level in the blackboard."""
         self.blackboard['battery_level'] = msg.percentage
+
+    # CODE WAS ADDED HERE
+    def partsSensorCallback(self, msg: UInt8MultiArray):
+        """Store the parts states in the blackboard."""
+        self.blackboard['parts_sensor'] = list(msg.data)
+
+    # CODE WAS ADDED HERE
+    def poseCallback(self, msg: PoseWithCovarianceStamped):
+        """Store the robot estimated position in the blackboard."""
+        self.blackboard['robot_pose'] = (msg.pose.pose.position.x,
+                                         msg.pose.pose.position.y)
+
+    # CODE WAS ADDED HERE
+    def odomCallback(self, msg: Odometry):
+        """Store the robot current speed in the blackboard."""
+        self.blackboard['robot_speed'] = \
+            abs(msg.twist.twist.linear.x) + abs(msg.twist.twist.angular.z)
+
+
+# CODE WAS ADDED HERE
+class NavigateState(State):
+    """Navigates to the position stored in blackboard['nav_goal'], using
+    the A* planner and the path navigation node reused from our LW1 work.
+    The goal is published in the goal_pose topic, the A* planner computes
+    the path in the configuration space and publishes it, and the path
+    navigation node follows it. This state waits until the robot is close
+    to the goal AND stopped (meaning the path navigation has finished, so
+    it no longer sends velocity commands that would conflict with the next
+    state). The goal is republished every few seconds, which also replans
+    the path from the current robot position."""
+
+    def __init__(self, yasmin_node) -> None:
+        # List of possible outcomes
+        super().__init__(['arrived'])
+        self.node = yasmin_node
+        self.goal_pub = yasmin_node.create_publisher(
+            PoseStamped, 'goal_pose', 1)
+
+    def execute(self, blackboard: Blackboard) -> str:
+        goal_x, goal_y = blackboard['nav_goal']
+        goal_msg = PoseStamped()
+        goal_msg.header.frame_id = 'map'
+        goal_msg.pose.position.x = goal_x
+        goal_msg.pose.position.y = goal_y
+        goal_msg.pose.orientation.w = 1.0
+
+        last_pub_time = 0.0
+        while True:
+            # Wait until we know where the robot is (the localization needs
+            # some time to start publishing)
+            if blackboard['robot_pose'] is not None:
+                robot_x, robot_y = blackboard['robot_pose']
+                distance = sqrt((robot_x - goal_x)**2 +
+                                (robot_y - goal_y)**2)
+                if (distance < myglobals.NAV_GOAL_TOLERANCE) and \
+                   (blackboard['robot_speed'] < 0.02):
+                    yasmin.YASMIN_LOG_INFO(
+                        f'Arrived at ({goal_x:.2f}, {goal_y:.2f}).')
+                    return 'arrived'
+                # (Re)publish the goal every 5 s. This also covers the case
+                # where the first goal was published before the planner had
+                # received the map and the pose.
+                if time.time() - last_pub_time > 5.0:
+                    goal_msg.header.stamp = \
+                        self.node.get_clock().now().to_msg()
+                    self.goal_pub.publish(goal_msg)
+                    last_pub_time = time.time()
+            time.sleep(0.5)
+
+
+# CODE WAS ADDED HERE
+class CheckTaskState(State):
+    """Decides what to do next: recharge, transport the next part, or finish.
+    This state runs at the beginning of each part cycle, so the battery is
+    always checked before starting to carry a new part."""
+
+    def __init__(self) -> None:
+        # List of possible outcomes
+        super().__init__(['next_part', 'low_battery', 'all_done'])
+
+    def execute(self, blackboard: Blackboard) -> str:
+        # If the battery is low, go recharge first
+        if blackboard['battery_level'] < myglobals.MIN_POWER_LEVEL:
+            # Use the left or right charging station, whichever is on the
+            # same side of the map as the robot (the center one is behind
+            # the central pillar and harder to reach)
+            if blackboard['last_x'] < 0:
+                charger = myglobals.recharge_targets_wpose[0]
+            else:
+                charger = myglobals.recharge_targets_wpose[2]
+            # CODE WAS ADDED HERE (navigation goal for the A* planner)
+            blackboard['nav_goal'] = (charger.x, charger.y)
+            yasmin.YASMIN_LOG_INFO(
+                'Battery is low, going to recharge...')
+            return 'low_battery'
+
+        # If all parts were delivered, we are done
+        if blackboard['part_idx'] >= myglobals.NUM_PARTS_TO_PROCESS:
+            blackboard['message2speak'] = 'All parts were delivered'
+            return 'all_done'
+
+        # Otherwise, prepare the next part cycle
+        i = blackboard['part_idx']
+        blackboard['proc_idx'] = i % len(myglobals.processing_units_x)
+        # Deliver on the same side of the map as the processing unit
+        if myglobals.processing_units_x[blackboard['proc_idx']] <= 0:
+            blackboard['delivery_idx'] = 0  # Left delivery unit
+        else:
+            blackboard['delivery_idx'] = 1  # Right delivery unit
+        # CODE WAS ADDED HERE (navigation goal for the A* planner: enter
+        # the input warehouse stall, ~0.7 m away from the part)
+        blackboard['nav_goal'] = (myglobals.input_parts_x[i],
+                                  myglobals.INPUT_APPROACH_Y)
+        yasmin.YASMIN_LOG_INFO(f'Going for part {i+1}...')
+        return 'next_part'
+
+
+# CODE WAS ADDED HERE
+class WaitProcessingState(State):
+    """Waits until the current part is processed (checking the parts_sensor
+    information stored in the blackboard). The robot is parked outside the
+    processing unit while waiting."""
+
+    def __init__(self) -> None:
+        # List of possible outcomes
+        super().__init__(['processed'])
+
+    def execute(self, blackboard: Blackboard) -> str:
+        i = blackboard['part_idx']
+        while blackboard['parts_sensor'][i] != myglobals.PART_PROCESSED:
+            time.sleep(1.0)
+        yasmin.YASMIN_LOG_INFO(f'Part {i+1} was processed.')
+        return 'processed'
+
+
+# CODE WAS ADDED HERE
+class BackupState(State):
+    """Moves the robot straight back for a short distance after dropping a
+    part, so the forklift does not hit the part when the robot rotates to
+    leave the unit. The velocity must be published periodically, because
+    the simulator stops the robot if no command arrives for 0.2 s."""
+
+    def __init__(self, yasmin_node) -> None:
+        # List of possible outcomes
+        super().__init__(['backed_up'])
+        self.vel_pub = yasmin_node.create_publisher(Twist, 'cmd_vel', 1)
+
+    def execute(self, blackboard: Blackboard) -> str:
+        vel_cmd = Twist()
+        duration = myglobals.BACKUP_DISTANCE / myglobals.BACKUP_LIN_VEL
+        start_time = time.time()
+        while time.time() - start_time < duration:
+            vel_cmd.linear.x = -myglobals.BACKUP_LIN_VEL
+            self.vel_pub.publish(vel_cmd)
+            time.sleep(0.1)
+        # Stop the robot
+        vel_cmd.linear.x = 0.0
+        self.vel_pub.publish(vel_cmd)
+        return 'backed_up'
 
 
 class FailureState(State):
@@ -88,9 +267,9 @@ class FailureState(State):
 
 def main(args=None):
     """
-    @brief  Main function for the simple task example using YASMIN.
+    @brief  Main function for the LW2 task using YASMIN.
 
-    Main function - runs a simple sequential task with few actions, implemented
+    Main function - runs the LW2 parts transportation task, implemented
     as a FSM using YASMIN.
     """
     rclpy.init(args=args)
@@ -102,7 +281,8 @@ def main(args=None):
     yasmin_node = YasminNode.get_instance()
 
     # Create a finite state machine (FSM)
-    sm = StateMachine(outcomes=["failure"])
+    # CODE WAS ADDED HERE (added the success outcome for when the task ends)
+    sm = StateMachine(outcomes=["failure", "success"])
 
     # Create the blackboard
     blackboard = Blackboard()
@@ -110,110 +290,425 @@ def main(args=None):
     blackboard['message2speak'] = ''
     # Initialize the stored battery level to 1.0 (100%)
     blackboard['battery_level'] = 1.0
+    # CODE WAS ADDED HERE (task related information)
+    # Last known state of each part (from the parts_sensor topic)
+    blackboard['parts_sensor'] = \
+        [myglobals.PART_UNPROCESSED] * myglobals.NUM_PARTS_TO_PROCESS
+    blackboard['part_idx'] = 0  # Part currently being transported
+    blackboard['proc_idx'] = 0  # Processing unit for the current part
+    blackboard['delivery_idx'] = 0  # Delivery unit for the current part
+    blackboard['nav_goal'] = None  # Target position for the A* navigation
+    blackboard['robot_pose'] = None  # Robot estimated position (x, y)
+    blackboard['robot_speed'] = 0.0  # Robot current speed
+    blackboard['last_x'] = 0.0  # Last known robot x position
 
     #
     # Add each state to the FSM
     #
 
-    #############################################################
-    # StandBy state
-    def create_goal_cb_standby(blackboard: Blackboard):
-        # Create the desired goal
-        goal = action.Stop.Goal()
-        return goal
+    # CODE WAS ADDED HERE (all the states below implement the LW2 task)
 
-    def result_handler_cb_standby(blackboard: Blackboard,
-                                  response: action.Stop.Result):
-        # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Stop in StandBy state finished with' +
-                               ' robot stopped: ' +
-                               str(response.is_stopped))
-        if blackboard['battery_level'] < myglobals.MIN_POWER_LEVEL:
-            # If battery level is low, proceed to recharge
-            return 'low_battery'
-        else:
-            return SUCCEED
+    #############################################################
+    # CheckTask state: decide between recharging, going for the next part,
+    # or finishing the task
     sm.add_state(
-        'STANDBY',
-        ActionState(
-            action_type=action.Stop,
-            action_name='ActionStop',
-            create_goal_handler=create_goal_cb_standby,
-            outcomes=[ABORT, CANCEL, SUCCEED, 'low_battery'],
-            result_handler=result_handler_cb_standby
-        ),
+        'CHECK_TASK',
+        CheckTaskState(),
         transitions={
-            'low_battery': 'MOTION',  # Proceed to motion state (to recharge)
-            SUCCEED: 'STANDBY',  # Loop back to stop state
-            ABORT: 'FAILURE',
-            CANCEL: 'FAILURE',
+            'next_part': 'NAV_TO_INPUT',
+            'low_battery': 'NAV_TO_CHARGER',
+            'all_done': 'SPEAK_DONE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # NavToInput state: navigate to the part in the input warehouse, using
+    # the A* planner and the path navigation (reused from the LW1)
+    sm.add_state(
+        'NAV_TO_INPUT',
+        NavigateState(yasmin_node),
+        transitions={
+            'arrived': 'ROTATE_TO_PART',
         },
     )
 
     #############################################################
-    # Motion state
-    def create_goal_cb_motion(blackboard: Blackboard):
+    # RotateToPart state: face the part before the visual servoing, since
+    # Move2Pos does not control the final orientation and the markers
+    # camera has a limited field of view. The parts in the input warehouse
+    # are to the south of the robot (-90 degrees).
+    def create_goal_cb_rotate_to_part(blackboard: Blackboard):
         # Create the desired goal
-        goal = action.Move2Pos.Goal(target_position=Point(
-            x=myglobals.recharge_targets_wpose.x,
-            y=myglobals.recharge_targets_wpose.y,
-            z=0.0))
+        goal = action.Rotate2Angle.Goal(target_orientation=-pi/2)
         return goal
 
-    def result_handler_cb_motion(blackboard: Blackboard,
-                                 response: action.Move2Pos.Result):
-        # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Move2Pos finished at: ' +
-                               response.final_pose.__str__())
+    def result_handler_cb_rotate_to_part(blackboard: Blackboard,
+                                         response: action.Rotate2Angle.Result):
         return SUCCEED
     sm.add_state(
-        'MOTION',
-        ActionState(
-            action_type=action.Move2Pos,
-            action_name='ActionMove2Pos',
-            create_goal_handler=create_goal_cb_motion,
-            outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=result_handler_cb_motion
-        ),
-        transitions={
-            SUCCEED: 'ROTATION',
-            ABORT: 'FAILURE',
-            CANCEL: 'FAILURE',
-        },
-    )
-
-    #############################################################
-    # Rotation state
-    def create_goal_cb_rotation(blackboard: Blackboard):
-        # Create the desired goal
-        goal = action.Rotate2Angle.Goal(
-            target_orientation=myglobals.recharge_targets_wpose.theta)
-        return goal
-
-    def result_handler_cb_rotation(blackboard: Blackboard,
-                                   response: action.Rotate2Angle.Result):
-        # Print the result
-        yasmin.YASMIN_LOG_INFO('Action Rotate2Angle finished at: ' +
-                               response.final_orientation.__str__())
-        return SUCCEED
-    sm.add_state(
-        'ROTATION',
+        'ROTATE_TO_PART',
         ActionState(
             action_type=action.Rotate2Angle,
             action_name='ActionRotate2Angle',
-            create_goal_handler=create_goal_cb_rotation,
+            create_goal_handler=create_goal_cb_rotate_to_part,
             outcomes=[ABORT, CANCEL, SUCCEED],
-            result_handler=result_handler_cb_rotation
+            result_handler=result_handler_cb_rotate_to_part
         ),
         transitions={
-            SUCCEED: 'STOP',
+            SUCCEED: 'APPROACH_PART',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
     )
 
     #############################################################
-    # Stop state
+    # ApproachPart state: fine approach to the part using visual servoing
+    def create_goal_cb_approach_part(blackboard: Blackboard):
+        # Create the desired goal
+        goal = action.MoveVisualServoing.Goal(
+            max_distance=myglobals.VS_MAX_DISTANCE,
+            max_bearing=myglobals.VS_MAX_BEARING)
+        return goal
+
+    def result_handler_cb_approach_part(
+            blackboard: Blackboard,
+            response: action.MoveVisualServoing.Result):
+        # Print the result
+        yasmin.YASMIN_LOG_INFO('Action MoveVisualServoing finished with ' +
+                               'success: ' + str(response.success))
+        return SUCCEED
+    sm.add_state(
+        'APPROACH_PART',
+        ActionState(
+            action_type=action.MoveVisualServoing,
+            action_name='ActionMoveVisualServoing',
+            create_goal_handler=create_goal_cb_approach_part,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_approach_part
+        ),
+        transitions={
+            SUCCEED: 'LIFT_PART',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    #############################################################
+    # LiftPart state: raise the forklift with the part, and prepare the
+    # route to the processing unit
+    def create_goal_cb_lift_part(blackboard: Blackboard):
+        # Create the desired goal
+        goal = action.MoveForklift.Goal(position=myglobals.FORKLIFT_UP)
+        return goal
+
+    def result_handler_cb_lift_part(blackboard: Blackboard,
+                                    response: action.MoveForklift.Result):
+        # CODE WAS ADDED HERE
+        # The next navigation goal is the processing unit drop position
+        proc_x = myglobals.processing_units_x[blackboard['proc_idx']]
+        blackboard['nav_goal'] = (proc_x, myglobals.PROC_DROP_Y)
+        return SUCCEED
+    sm.add_state(
+        'LIFT_PART',
+        ActionState(
+            action_type=action.MoveForklift,
+            action_name='ActionMoveForklift',
+            create_goal_handler=create_goal_cb_lift_part,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_lift_part
+        ),
+        transitions={
+            SUCCEED: 'NAV_TO_PROCESSING',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # NavToProcessing state: navigate to the processing unit
+    sm.add_state(
+        'NAV_TO_PROCESSING',
+        NavigateState(yasmin_node),
+        transitions={
+            'arrived': 'DROP_PART',
+        },
+    )
+
+    #############################################################
+    # DropPart state: lower the forklift, leaving the part in the
+    # processing unit
+    def create_goal_cb_drop_part(blackboard: Blackboard):
+        # Create the desired goal
+        goal = action.MoveForklift.Goal(position=myglobals.FORKLIFT_DOWN)
+        return goal
+
+    def result_handler_cb_drop_part(blackboard: Blackboard,
+                                    response: action.MoveForklift.Result):
+        return SUCCEED
+    sm.add_state(
+        'DROP_PART',
+        ActionState(
+            action_type=action.MoveForklift,
+            action_name='ActionMoveForklift',
+            create_goal_handler=create_goal_cb_drop_part,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_drop_part
+        ),
+        transitions={
+            SUCCEED: 'BACKUP_PROC',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # BackupProc state: move back a little after dropping the part, so the
+    # forklift does not hit it when the robot rotates to leave
+    sm.add_state(
+        'BACKUP_PROC',
+        BackupState(yasmin_node),
+        transitions={
+            'backed_up': 'EXIT_PROCESSING',
+        },
+    )
+
+    #############################################################
+    # ExitProcessing state: leave the processing unit, since the part only
+    # starts being processed when the robot is outside the unit
+    def create_goal_cb_exit_processing(blackboard: Blackboard):
+        # Create the desired goal
+        proc_x = myglobals.processing_units_x[blackboard['proc_idx']]
+        goal = action.Move2Pos.Goal(target_position=Point(
+            x=proc_x, y=myglobals.UNITS_EXIT_Y, z=0.0))
+        return goal
+
+    def result_handler_cb_exit_processing(blackboard: Blackboard,
+                                          response: action.Move2Pos.Result):
+        return SUCCEED
+    sm.add_state(
+        'EXIT_PROCESSING',
+        ActionState(
+            action_type=action.Move2Pos,
+            action_name='ActionMove2Pos',
+            create_goal_handler=create_goal_cb_exit_processing,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_exit_processing
+        ),
+        transitions={
+            SUCCEED: 'WAIT_PROCESSING',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    #############################################################
+    # WaitProcessing state: wait until the part is processed
+    sm.add_state(
+        'WAIT_PROCESSING',
+        WaitProcessingState(),
+        transitions={
+            'processed': 'REENTER_PROCESSING',
+        },
+    )
+
+    #############################################################
+    # ReenterProcessing state: get close to the processed part again (about
+    # 1 m away, so the markers camera is able to detect it)
+    def create_goal_cb_reenter_processing(blackboard: Blackboard):
+        # Create the desired goal
+        proc_x = myglobals.processing_units_x[blackboard['proc_idx']]
+        goal = action.Move2Pos.Goal(target_position=Point(
+            x=proc_x, y=myglobals.PROC_REPICK_Y, z=0.0))
+        return goal
+
+    def result_handler_cb_reenter_processing(blackboard: Blackboard,
+                                             response: action.Move2Pos.Result):
+        return SUCCEED
+    sm.add_state(
+        'REENTER_PROCESSING',
+        ActionState(
+            action_type=action.Move2Pos,
+            action_name='ActionMove2Pos',
+            create_goal_handler=create_goal_cb_reenter_processing,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_reenter_processing
+        ),
+        transitions={
+            SUCCEED: 'ROTATE_TO_PART2',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    #############################################################
+    # RotateToPart2 state: face the processed part before the visual
+    # servoing. The part in the processing unit is to the north of the
+    # robot (90 degrees).
+    def create_goal_cb_rotate_to_part2(blackboard: Blackboard):
+        # Create the desired goal
+        goal = action.Rotate2Angle.Goal(target_orientation=pi/2)
+        return goal
+
+    def result_handler_cb_rotate_to_part2(
+            blackboard: Blackboard,
+            response: action.Rotate2Angle.Result):
+        return SUCCEED
+    sm.add_state(
+        'ROTATE_TO_PART2',
+        ActionState(
+            action_type=action.Rotate2Angle,
+            action_name='ActionRotate2Angle',
+            create_goal_handler=create_goal_cb_rotate_to_part2,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_rotate_to_part2
+        ),
+        transitions={
+            SUCCEED: 'REAPPROACH_PART',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    #############################################################
+    # ReapproachPart state: fine approach to the processed part using
+    # visual servoing (same goal as the ApproachPart state)
+    sm.add_state(
+        'REAPPROACH_PART',
+        ActionState(
+            action_type=action.MoveVisualServoing,
+            action_name='ActionMoveVisualServoing',
+            create_goal_handler=create_goal_cb_approach_part,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_approach_part
+        ),
+        transitions={
+            SUCCEED: 'LIFT_PART2',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    #############################################################
+    # LiftPart2 state: raise the forklift with the processed part, and
+    # prepare the route to the delivery unit
+    def result_handler_cb_lift_part2(blackboard: Blackboard,
+                                     response: action.MoveForklift.Result):
+        # CODE WAS ADDED HERE
+        # The next navigation goal is the delivery unit drop position
+        delivery_x = myglobals.delivery_units_x[blackboard['delivery_idx']]
+        blackboard['nav_goal'] = (delivery_x, myglobals.DELIVERY_DROP_Y)
+        return SUCCEED
+    sm.add_state(
+        'LIFT_PART2',
+        ActionState(
+            action_type=action.MoveForklift,
+            action_name='ActionMoveForklift',
+            create_goal_handler=create_goal_cb_lift_part,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_lift_part2
+        ),
+        transitions={
+            SUCCEED: 'NAV_TO_DELIVERY',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # NavToDelivery state: navigate to the delivery unit
+    sm.add_state(
+        'NAV_TO_DELIVERY',
+        NavigateState(yasmin_node),
+        transitions={
+            'arrived': 'DROP_DELIVERY',
+        },
+    )
+
+    #############################################################
+    # DropDelivery state: lower the forklift, leaving the part in the
+    # delivery unit
+    sm.add_state(
+        'DROP_DELIVERY',
+        ActionState(
+            action_type=action.MoveForklift,
+            action_name='ActionMoveForklift',
+            create_goal_handler=create_goal_cb_drop_part,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_drop_part
+        ),
+        transitions={
+            SUCCEED: 'BACKUP_DELIVERY',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # BackupDelivery state: same as BackupProc, but in the delivery unit
+    sm.add_state(
+        'BACKUP_DELIVERY',
+        BackupState(yasmin_node),
+        transitions={
+            'backed_up': 'EXIT_DELIVERY',
+        },
+    )
+
+    #############################################################
+    # ExitDelivery state: leave the delivery unit (the part is only marked
+    # as delivered when the robot is outside the unit), and move on to the
+    # next part
+    def create_goal_cb_exit_delivery(blackboard: Blackboard):
+        # Create the desired goal
+        delivery_x = myglobals.delivery_units_x[blackboard['delivery_idx']]
+        goal = action.Move2Pos.Goal(target_position=Point(
+            x=delivery_x, y=myglobals.UNITS_EXIT_Y, z=0.0))
+        return goal
+
+    def result_handler_cb_exit_delivery(blackboard: Blackboard,
+                                        response: action.Move2Pos.Result):
+        # Print the result
+        yasmin.YASMIN_LOG_INFO(
+            f'Part {blackboard["part_idx"]+1} was delivered!')
+        # Store the robot position and proceed to the next part
+        blackboard['last_x'] = \
+            myglobals.delivery_units_x[blackboard['delivery_idx']]
+        blackboard['part_idx'] += 1
+        return SUCCEED
+    sm.add_state(
+        'EXIT_DELIVERY',
+        ActionState(
+            action_type=action.Move2Pos,
+            action_name='ActionMove2Pos',
+            create_goal_handler=create_goal_cb_exit_delivery,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_exit_delivery
+        ),
+        transitions={
+            SUCCEED: 'CHECK_TASK',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # NavToCharger state: navigate to the charging station
+    sm.add_state(
+        'NAV_TO_CHARGER',
+        NavigateState(yasmin_node),
+        transitions={
+            'arrived': 'STOP_AT_CHARGER',
+        },
+    )
+
+    #############################################################
+    # StopAtCharger state: make sure the robot is fully stopped, since the
+    # simulator only starts charging if the robot is stopped
     def create_goal_cb_stop(blackboard: Blackboard):
         # Create the desired goal
         goal = action.Stop.Goal()
@@ -226,7 +721,7 @@ def main(args=None):
                                str(response.is_stopped))
         return SUCCEED
     sm.add_state(
-        'STOP',
+        'STOP_AT_CHARGER',
         ActionState(
             action_type=action.Stop,
             action_name='ActionStop',
@@ -235,7 +730,7 @@ def main(args=None):
             result_handler=result_handler_cb_stop
         ),
         transitions={
-            SUCCEED: 'RECHARGE',  # Loop back to stop state
+            SUCCEED: 'RECHARGE',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
@@ -245,14 +740,12 @@ def main(args=None):
     # Recharge state
     def create_goal_cb_recharge(blackboard: Blackboard):
         # Create the desired goal
-        goal = action.Recharge.Goal(target_battery_level=1.0)
+        goal = action.Recharge.Goal(
+            target_battery_level=myglobals.MAX_POWER_LEVEL)
         return goal
 
     def result_handler_cb_recharge(blackboard: Blackboard,
                                    response: action.Recharge.Result):
-        # Store the message with the battery level in the blackboard
-        blackboard['message2speak'] = \
-            f'Battery recharged up to {response.battery_level*100:.0f}%'
         # Print the result
         yasmin.YASMIN_LOG_INFO('Action Recharge finished with battery at: ' +
                                f'{response.battery_level*100:.0f}%')
@@ -267,14 +760,14 @@ def main(args=None):
             result_handler=result_handler_cb_recharge
         ),
         transitions={
-            SUCCEED: 'SPEAK',
+            SUCCEED: 'CHECK_TASK',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
     )
 
     #############################################################
-    # Speak state
+    # SpeakDone state: announce the end of the task
     def create_goal_cb_speak(blackboard: Blackboard):
         # Create the desired goal
         goal = action.SpeakText.Goal(text_to_speak=blackboard['message2speak'])
@@ -287,7 +780,7 @@ def main(args=None):
                                str(response.text_spoken))
         return SUCCEED
     sm.add_state(
-        'SPEAK',
+        'SPEAK_DONE',
         ActionState(
             action_type=action.SpeakText,
             action_name='ActionSpeakText',
@@ -296,7 +789,7 @@ def main(args=None):
             result_handler=result_handler_cb_speak
         ),
         transitions={
-            SUCCEED: 'STANDBY',
+            SUCCEED: 'success',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
@@ -313,7 +806,10 @@ def main(args=None):
     )
 
     # Publish FSM information for visualization
-    YasminViewerPub('TW10_YASMIN', sm)
+    # CODE WAS ADDED HERE (in YASMIN 5 the FSM is the first argument; with
+    # the name first, the viewer tried to validate the name string and
+    # failed with "'str' object has no attribute 'validate'")
+    YasminViewerPub(sm, 'LW2_YASMIN')
 
     #############################################################
     # Get our robot state to backboard synchronizer
