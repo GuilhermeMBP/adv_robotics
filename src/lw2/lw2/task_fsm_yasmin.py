@@ -524,13 +524,11 @@ def main(args=None):
         # CODE WAS ADDED HERE
         # Instead of waiting parked outside the unit, the robot always goes
         # to recharge while the part is being processed (20 to 50 s), using
-        # the charger on the same side as the processing unit. This uses the
-        # processing dead time to keep the battery topped up, so there is no
-        # need to monitor the battery level while waiting.
-        if myglobals.processing_units_x[blackboard['proc_idx']] <= 0:
-            blackboard['charger_idx'] = 0
-        else:
-            blackboard['charger_idx'] = 2
+        # the charger below the processing unit (both are ordered left,
+        # center, right, so the indexes match). This uses the processing
+        # dead time to keep the battery topped up, so there is no need to
+        # monitor the battery level while waiting.
+        blackboard['charger_idx'] = blackboard['proc_idx']
         charger = \
             myglobals.recharge_targets_wpose[blackboard['charger_idx']]
         blackboard['nav_goal'] = (charger.x, charger.y)
@@ -745,8 +743,14 @@ def main(args=None):
         blackboard['last_x'] = \
             myglobals.delivery_units_x[blackboard['delivery_idx']]
         # CODE WAS ADDED HERE (one more part in this delivery unit, so the
-        # next one delivered here will use the next free lane)
-        blackboard['delivered_count'][blackboard['delivery_idx']] += 1
+        # next one delivered here will use the next free lane. Note: the
+        # YASMIN 5 blackboard is implemented in C++ and returns a COPY of
+        # the stored value on each read, so mutating the list in place,
+        # e.g. blackboard['delivered_count'][i] += 1, would be silently
+        # lost -- the list must be read, changed and written back)
+        counts = blackboard['delivered_count']
+        counts[blackboard['delivery_idx']] += 1
+        blackboard['delivered_count'] = counts
         blackboard['part_idx'] += 1
         # CODE WAS ADDED HERE
         # After a successful delivery the robot always goes to recharge
@@ -893,20 +897,21 @@ def main(args=None):
 
     # CODE WAS ADDED HERE
     #############################################################
-    # ExitCharger state: leave the charger moving forward to a point to the
-    # north of the charger center. The robot may end the entering motion
-    # with an arbitrary orientation (Move2Pos does not control the final
-    # orientation), so a blind backup could push it against the pillar and
-    # into the inflated area, where the A* has no solution. Moving to a
-    # point to the north is always safe: the rotation towards north never
-    # sweeps the forks through the pillar (which is to the south), and the
-    # exit point is in free configuration space.
+    # ExitCharger state: leave the charger moving forward to a point away
+    # from the pillar (north of the left/right chargers, south of the
+    # center one). The robot may end the entering motion with an arbitrary
+    # orientation (Move2Pos does not control the final orientation), so a
+    # blind backup could push it against the pillar and into the inflated
+    # area, where the A* has no solution. Moving to the exit point is
+    # always safe: the rotation towards it never sweeps the forks through
+    # the pillar, and the exit point is in free configuration space.
     def create_goal_cb_exit_charger(blackboard: Blackboard):
         # Create the desired goal
         charger = myglobals.recharge_centers_wpose[blackboard['charger_idx']]
         goal = action.Move2Pos.Goal(target_position=Point(
             x=charger.x,
-            y=charger.y + myglobals.CHARGER_EXIT_OFFSET,
+            y=charger.y +
+            myglobals.CHARGER_EXIT_OFFSETS[blackboard['charger_idx']],
             z=0.0))
         return goal
 

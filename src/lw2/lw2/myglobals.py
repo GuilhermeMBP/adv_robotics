@@ -58,16 +58,17 @@ execution_rate = 10  # Hz
 # TW10 world). The task FSM uses the left or right one, whichever is closer
 # (the center one is behind the central round pillar).
 # The chargers are next to the round pillars (the pillar is right to the
-# south of each charging rectangle), so the approach must be done from the
-# side: entering from the north with the forklift pointing forward, the
-# forks (which reach 0.42 m ahead of the robot center) would hit the pillar
-# (its edge is only ~0.3 m from the charger center). The A* targets below
-# are therefore placed ~0.8 m to the side of each charger, outside the
-# inflated configuration space, and the final approach to the center is
-# done sideways with Move2Pos, keeping the forks parallel to the pillar.
+# south of the left/right charging rectangles, and right to the NORTH of
+# the center one), so the approach must be done from the side: entering
+# with the forklift pointing at the pillar, the forks (which reach 0.42 m
+# ahead of the robot center) would hit it (its edge is only ~0.3 m from
+# the charger center). The A* targets below are therefore placed ~1 m to
+# the side of each charger, outside the inflated configuration space, and
+# the final approach to the center is done sideways with Move2Pos, keeping
+# the forks parallel to the pillar.
 recharge_targets_wpose = [
     Pose2D(x=-4.0, y=-2.3, theta=-pi/2),  # east of charger1 (left)
-    Pose2D(x=0.8, y=-2.8, theta=-pi/2),   # east of charger2 (center)
+    Pose2D(x=1.0, y=-2.9, theta=-pi/2),   # east of charger2 (center)
     Pose2D(x=4.0, y=-2.0, theta=-pi/2)]   # west of charger3 (right)
 
 # CODE WAS ADDED HERE
@@ -145,16 +146,17 @@ VS_MAX_BEARING = 0.1   # [rad]
 # hit the part when the robot rotates to leave the unit
 BACKUP_DISTANCE = 0.5  # [m]
 BACKUP_LIN_VEL = 0.1   # [m/s]
-# Exit point offset to leave the charger: the robot leaves the charger
-# moving forward (Move2Pos) to a point this far to the NORTH of the
-# charger center. Exiting to the north is safe regardless of the (not
+# Exit point offsets (in y, one per charger) to leave the charger: the
+# robot leaves moving forward (Move2Pos) to a point this far from the
+# charger center, away from the pillar: to the NORTH in the left/right
+# chargers (pillar to the south) and to the SOUTH in the center one
+# (pillar to the north). Exiting this way is safe regardless of the (not
 # controlled) orientation in which the robot ended the entering motion:
-# rotating from a roughly west/east heading towards north never sweeps
-# the forks (0.42 m reach) through the pillar to the south (~0.3 m away),
-# and the exit point is in free configuration space, so the next A* plan
-# always has a valid start (a blind backup could end inside the inflated
-# area if the robot was not aligned with the entering direction).
-CHARGER_EXIT_OFFSET = 0.6  # [m]
+# rotating from a roughly west/east heading towards the exit point never
+# sweeps the forks (0.42 m reach) through the pillar (~0.3 m away), and
+# the exit points are in free configuration space, so the next A* plan
+# always has a valid start.
+CHARGER_EXIT_OFFSETS = [0.6, -0.6, 0.6]  # [m]
 
 # CODE WAS ADDED HERE
 # Maximum distance to a navigation goal to consider it reached (the A*
