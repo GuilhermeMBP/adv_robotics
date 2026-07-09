@@ -76,9 +76,16 @@ class Move2PosActionServer(Node):
 
         # Navigation variables
         self.Kp_lin_vel = 0.5  # Proportional gain for the linear vel. control
-        self.Kp_ang_vel = 0.5  # Propostional gain for the angular vel. control
+        # CODE WAS ADDED HERE (the two values below were changed, following
+        # what we did in the LW1 path navigation: the robot first rotates in
+        # place towards the target and only moves forward when it is almost
+        # facing it. With the original values (gain 0.5 and 30 degrees) the
+        # robot would start moving while still turning, describing arcs and
+        # ending each motion rotated to unpredictable orientations, which
+        # caused collisions with the forklift near the chargers/pillars.)
+        self.Kp_ang_vel = 3.0  # Propostional gain for the angular vel. control
         self.min_distance = 0.1  # Minimum accepted distance to target [m]
-        self.max_angle_to_target = radians(30.0)
+        self.max_angle_to_target = radians(10.0)
         self.velocity_at_target = 0.0
 
         ''' ROS related code '''
