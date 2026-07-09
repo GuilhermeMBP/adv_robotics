@@ -57,15 +57,31 @@ execution_rate = 10  # Hz
 # The LW2 world has 3 charging stations (the old (0, -2) value was from the
 # TW10 world). The task FSM uses the left or right one, whichever is closer
 # (the center one is behind the central round pillar).
-# The chargers are next to the pillars, so with the 0.4 m map inflation the
-# center of their rectangles is inside the configuration space and the A*
-# would not find a path. The targets below are therefore placed in the free
-# part of each charging rectangle (charging works anywhere inside it), as
-# verified in the LW1 inflated map.
+# The chargers are next to the round pillars (the pillar is right to the
+# south of each charging rectangle), so the approach must be done from the
+# side: entering from the north with the forklift pointing forward, the
+# forks (which reach 0.42 m ahead of the robot center) would hit the pillar
+# (its edge is only ~0.3 m from the charger center). The A* targets below
+# are therefore placed ~0.8 m to the side of each charger, outside the
+# inflated configuration space, and the final approach to the center is
+# done sideways with Move2Pos, keeping the forks parallel to the pillar.
 recharge_targets_wpose = [
-    Pose2D(x=-4.8, y=-2.2, theta=-pi/2),  # charger1 (left)
-    Pose2D(x=0.0, y=-2.8, theta=-pi/2),   # charger2 (center, behind pillar)
-    Pose2D(x=4.8, y=-1.9, theta=-pi/2)]   # charger3 (right)
+    Pose2D(x=-4.0, y=-2.3, theta=-pi/2),  # east of charger1 (left)
+    Pose2D(x=0.8, y=-2.8, theta=-pi/2),   # east of charger2 (center)
+    Pose2D(x=4.0, y=-2.0, theta=-pi/2)]   # west of charger3 (right)
+
+# CODE WAS ADDED HERE
+# Centers of the charging rectangles used by the simulator. The sim_control
+# node only charges while the robot is stopped AND inside a 0.5x0.5 m
+# rectangle centered in these positions. The A* targets above are offset
+# from these centers (because of the map inflation), and with the 0.2 m
+# navigation tolerance the robot could stop outside the rectangle, so the
+# final approach is done with Move2Pos directly to these centers (Move2Pos
+# does not use the map, so the inflation is not a problem).
+recharge_centers_wpose = [
+    Pose2D(x=-4.8, y=-2.3, theta=-pi/2),  # charger1 (left)
+    Pose2D(x=0.0, y=-2.8, theta=-pi/2),   # charger2 (center)
+    Pose2D(x=4.8, y=-2.0, theta=-pi/2)]   # charger3 (right)
 
 # CODE WAS ADDED HERE
 # ---------------------------------------------------------------------------
@@ -97,6 +113,15 @@ PROCESSING_UNITS_Y = 2.0
 delivery_units_x = [-4.80, 4.80]
 
 # CODE WAS ADDED HERE
+# Horizontal offsets ("lanes") inside a delivery unit, one per part
+# delivered there. The delivered parts stay in the unit, so dropping every
+# part in the same position would crash the carried part into the ones
+# already delivered. With 5 parts and 2 delivery units, a unit receives at
+# most 3 parts, hence 3 lanes 0.7 m apart (the delivery bays are ~2.2 m
+# wide, so all lanes stay well inside the unit).
+DELIVERY_LANE_OFFSETS = [-0.7, 0.0, 0.7]
+
+# CODE WAS ADDED HERE
 # Exit point below the processing/delivery units: after dropping a part
 # the robot moves here (straight line out of the unit), so the simulator
 # detects that the robot left the unit. The path planning between areas is
@@ -120,6 +145,16 @@ VS_MAX_BEARING = 0.1   # [rad]
 # hit the part when the robot rotates to leave the unit
 BACKUP_DISTANCE = 0.5  # [m]
 BACKUP_LIN_VEL = 0.1   # [m/s]
+# Exit point offset to leave the charger: the robot leaves the charger
+# moving forward (Move2Pos) to a point this far to the NORTH of the
+# charger center. Exiting to the north is safe regardless of the (not
+# controlled) orientation in which the robot ended the entering motion:
+# rotating from a roughly west/east heading towards north never sweeps
+# the forks (0.42 m reach) through the pillar to the south (~0.3 m away),
+# and the exit point is in free configuration space, so the next A* plan
+# always has a valid start (a blind backup could end inside the inflated
+# area if the robot was not aligned with the entering direction).
+CHARGER_EXIT_OFFSET = 0.6  # [m]
 
 # CODE WAS ADDED HERE
 # Maximum distance to a navigation goal to consider it reached (the A*
