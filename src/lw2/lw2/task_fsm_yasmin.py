@@ -168,7 +168,12 @@ class CheckTaskState(State):
 
     def __init__(self) -> None:
         # List of possible outcomes
-        super().__init__(['next_part', 'low_battery', 'all_done'])
+        # CODE WAS ADDED HERE (the part_in_processing outcome was added:
+        # since the robot now recharges while the part is being processed,
+        # this state must know how to resume a part left at the processing
+        # unit instead of always starting at the input warehouse)
+        super().__init__(['next_part', 'part_in_processing', 'low_battery',
+                          'all_done'])
 
     def execute(self, blackboard: Blackboard) -> str:
         # If the battery is low, go recharge first
@@ -177,25 +182,49 @@ class CheckTaskState(State):
             # same side of the map as the robot (the center one is behind
             # the central pillar and harder to reach)
             if blackboard['last_x'] < 0:
-                charger = myglobals.recharge_targets_wpose[0]
+                blackboard['charger_idx'] = 0
             else:
-                charger = myglobals.recharge_targets_wpose[2]
-            # CODE WAS ADDED HERE (navigation goal for the A* planner)
+                blackboard['charger_idx'] = 2
+            charger = \
+                myglobals.recharge_targets_wpose[blackboard['charger_idx']]
+            # CODE WAS ADDED HERE (navigation goal for the A* planner; the
+            # charger index is also stored, so that the fine approach state
+            # knows which charging rectangle center to use)
             blackboard['nav_goal'] = (charger.x, charger.y)
             yasmin.YASMIN_LOG_INFO(
                 'Battery is low, going to recharge...')
             return 'low_battery'
 
         # If all parts were delivered, we are done
+        # CODE WAS ADDED HERE (this check must run before the check below,
+        # otherwise after the last delivery part_idx is already past the
+        # end of the parts_sensor list)
         if blackboard['part_idx'] >= myglobals.NUM_PARTS_TO_PROCESS:
             blackboard['message2speak'] = 'All parts were delivered'
             return 'all_done'
 
+        # CODE WAS ADDED HERE
+        # If the current part was already left at the processing unit (the
+        # robot recharges while the part is being processed), go back to the
+        # waiting point outside the processing unit instead of starting a
+        # new part cycle. The waiting must be done outside the unit, since
+        # entering it while the part is IN_PROCESS resets the processing.
+        i = blackboard['part_idx']
+        if blackboard['parts_sensor'][i] in (myglobals.PART_IN_PROCESS,
+                                             myglobals.PART_PROCESSED):
+            proc_x = myglobals.processing_units_x[blackboard['proc_idx']]
+            blackboard['nav_goal'] = (proc_x, myglobals.UNITS_EXIT_Y)
+            yasmin.YASMIN_LOG_INFO(f'Going back for part {i+1}...')
+            return 'part_in_processing'
+
         # Otherwise, prepare the next part cycle
         i = blackboard['part_idx']
         blackboard['proc_idx'] = i % len(myglobals.processing_units_x)
-        # Deliver on the same side of the map as the processing unit
-        if myglobals.processing_units_x[blackboard['proc_idx']] <= 0:
+        # Deliver on the same side of the map as the processing unit. The
+        # center processing unit (x = 0) delivers on the right, so that no
+        # delivery unit receives more parts than the available lanes (with
+        # 5 parts: 2 on the left unit and 3 on the right one).
+        if myglobals.processing_units_x[blackboard['proc_idx']] < 0:
             blackboard['delivery_idx'] = 0  # Left delivery unit
         else:
             blackboard['delivery_idx'] = 1  # Right delivery unit
@@ -301,6 +330,10 @@ def main(args=None):
     blackboard['robot_pose'] = None  # Robot estimated position (x, y)
     blackboard['robot_speed'] = 0.0  # Robot current speed
     blackboard['last_x'] = 0.0  # Last known robot x position
+    blackboard['charger_idx'] = 0  # Charging station to use when recharging
+    # Number of parts already delivered in each delivery unit, used to
+    # choose a free lane for the next part
+    blackboard['delivered_count'] = [0, 0]
 
     #
     # Add each state to the FSM
@@ -316,6 +349,7 @@ def main(args=None):
         CheckTaskState(),
         transitions={
             'next_part': 'NAV_TO_INPUT',
+            'part_in_processing': 'NAV_BACK_TO_PROC',
             'low_battery': 'NAV_TO_CHARGER',
             'all_done': 'SPEAK_DONE',
         },
@@ -487,6 +521,19 @@ def main(args=None):
 
     def result_handler_cb_exit_processing(blackboard: Blackboard,
                                           response: action.Move2Pos.Result):
+        # CODE WAS ADDED HERE
+        # Instead of waiting parked outside the unit, the robot always goes
+        # to recharge while the part is being processed (20 to 50 s), using
+        # the charger on the same side as the processing unit. This uses the
+        # processing dead time to keep the battery topped up, so there is no
+        # need to monitor the battery level while waiting.
+        if myglobals.processing_units_x[blackboard['proc_idx']] <= 0:
+            blackboard['charger_idx'] = 0
+        else:
+            blackboard['charger_idx'] = 2
+        charger = \
+            myglobals.recharge_targets_wpose[blackboard['charger_idx']]
+        blackboard['nav_goal'] = (charger.x, charger.y)
         return SUCCEED
     sm.add_state(
         'EXIT_PROCESSING',
@@ -498,14 +545,28 @@ def main(args=None):
             result_handler=result_handler_cb_exit_processing
         ),
         transitions={
-            SUCCEED: 'WAIT_PROCESSING',
+            SUCCEED: 'NAV_TO_CHARGER',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
     )
 
+    # CODE WAS ADDED HERE
     #############################################################
-    # WaitProcessing state: wait until the part is processed
+    # NavBackToProc state: after recharging, navigate back to the waiting
+    # point outside the processing unit (the robot must stay outside the
+    # unit until the part is processed)
+    sm.add_state(
+        'NAV_BACK_TO_PROC',
+        NavigateState(yasmin_node),
+        transitions={
+            'arrived': 'WAIT_PROCESSING',
+        },
+    )
+
+    #############################################################
+    # WaitProcessing state: wait until the part is processed (usually it
+    # already is, since the robot recharged in the meantime)
     sm.add_state(
         'WAIT_PROCESSING',
         WaitProcessingState(),
@@ -597,8 +658,14 @@ def main(args=None):
     def result_handler_cb_lift_part2(blackboard: Blackboard,
                                      response: action.MoveForklift.Result):
         # CODE WAS ADDED HERE
-        # The next navigation goal is the delivery unit drop position
-        delivery_x = myglobals.delivery_units_x[blackboard['delivery_idx']]
+        # The next navigation goal is the delivery unit drop position, using
+        # a free lane: the parts already delivered stay inside the unit, so
+        # each new part is dropped 0.7 m to the side of the previous one to
+        # avoid crashing the carried part into them
+        count = blackboard['delivered_count'][blackboard['delivery_idx']]
+        delivery_x = \
+            myglobals.delivery_units_x[blackboard['delivery_idx']] + \
+            myglobals.DELIVERY_LANE_OFFSETS[count]
         blackboard['nav_goal'] = (delivery_x, myglobals.DELIVERY_DROP_Y)
         return SUCCEED
     sm.add_state(
@@ -677,7 +744,25 @@ def main(args=None):
         # Store the robot position and proceed to the next part
         blackboard['last_x'] = \
             myglobals.delivery_units_x[blackboard['delivery_idx']]
+        # CODE WAS ADDED HERE (one more part in this delivery unit, so the
+        # next one delivered here will use the next free lane)
+        blackboard['delivered_count'][blackboard['delivery_idx']] += 1
         blackboard['part_idx'] += 1
+        # CODE WAS ADDED HERE
+        # After a successful delivery the robot always goes to recharge
+        # (using the charger on the same side as the delivery unit), before
+        # starting the next part. Recharging only while the part was being
+        # processed was not enough: the trip from the delivery unit to the
+        # input warehouse and back to a processing unit could take longer
+        # than the battery allowed, ending with the battery at 0. Charging
+        # at these two fixed moments guarantees the battery never runs out.
+        if myglobals.delivery_units_x[blackboard['delivery_idx']] < 0:
+            blackboard['charger_idx'] = 0
+        else:
+            blackboard['charger_idx'] = 2
+        charger = \
+            myglobals.recharge_targets_wpose[blackboard['charger_idx']]
+        blackboard['nav_goal'] = (charger.x, charger.y)
         return SUCCEED
     sm.add_state(
         'EXIT_DELIVERY',
@@ -689,7 +774,10 @@ def main(args=None):
             result_handler=result_handler_cb_exit_delivery
         ),
         transitions={
-            SUCCEED: 'CHECK_TASK',
+            # CODE WAS ADDED HERE (recharge after each delivery; the
+            # CHECK_TASK state then decides the next part when the
+            # recharging sequence ends)
+            SUCCEED: 'NAV_TO_CHARGER',
             ABORT: 'FAILURE',
             CANCEL: 'FAILURE',
         },
@@ -702,7 +790,44 @@ def main(args=None):
         'NAV_TO_CHARGER',
         NavigateState(yasmin_node),
         transitions={
-            'arrived': 'STOP_AT_CHARGER',
+            'arrived': 'MOVE_TO_CHARGER_CENTER',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # MoveToChargerCenter state: fine approach to the center of the charging
+    # rectangle, entering sideways. The A* navigation target is ~0.8 m to
+    # the side of the charger (the center is inside the inflated map, and
+    # the 0.2 m navigation tolerance could leave the robot outside the
+    # 0.5x0.5 m charging rectangle, in which case the simulator refuses to
+    # charge). Move2Pos does not use the map, so it can do the last few
+    # centimeters to the exact center; and since the robot comes from the
+    # side, the forks stay parallel to the pillar to the south of the
+    # charger instead of hitting it.
+    def create_goal_cb_move_to_charger(blackboard: Blackboard):
+        # Create the desired goal
+        charger = myglobals.recharge_centers_wpose[blackboard['charger_idx']]
+        goal = action.Move2Pos.Goal(target_position=Point(
+            x=charger.x, y=charger.y, z=0.0))
+        return goal
+
+    def result_handler_cb_move_to_charger(blackboard: Blackboard,
+                                          response: action.Move2Pos.Result):
+        return SUCCEED
+    sm.add_state(
+        'MOVE_TO_CHARGER_CENTER',
+        ActionState(
+            action_type=action.Move2Pos,
+            action_name='ActionMove2Pos',
+            create_goal_handler=create_goal_cb_move_to_charger,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_move_to_charger
+        ),
+        transitions={
+            SUCCEED: 'STOP_AT_CHARGER',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
         },
     )
 
@@ -758,6 +883,44 @@ def main(args=None):
             create_goal_handler=create_goal_cb_recharge,
             outcomes=[ABORT, CANCEL, SUCCEED],
             result_handler=result_handler_cb_recharge
+        ),
+        transitions={
+            SUCCEED: 'EXIT_CHARGER',
+            ABORT: 'FAILURE',
+            CANCEL: 'FAILURE',
+        },
+    )
+
+    # CODE WAS ADDED HERE
+    #############################################################
+    # ExitCharger state: leave the charger moving forward to a point to the
+    # north of the charger center. The robot may end the entering motion
+    # with an arbitrary orientation (Move2Pos does not control the final
+    # orientation), so a blind backup could push it against the pillar and
+    # into the inflated area, where the A* has no solution. Moving to a
+    # point to the north is always safe: the rotation towards north never
+    # sweeps the forks through the pillar (which is to the south), and the
+    # exit point is in free configuration space.
+    def create_goal_cb_exit_charger(blackboard: Blackboard):
+        # Create the desired goal
+        charger = myglobals.recharge_centers_wpose[blackboard['charger_idx']]
+        goal = action.Move2Pos.Goal(target_position=Point(
+            x=charger.x,
+            y=charger.y + myglobals.CHARGER_EXIT_OFFSET,
+            z=0.0))
+        return goal
+
+    def result_handler_cb_exit_charger(blackboard: Blackboard,
+                                       response: action.Move2Pos.Result):
+        return SUCCEED
+    sm.add_state(
+        'EXIT_CHARGER',
+        ActionState(
+            action_type=action.Move2Pos,
+            action_name='ActionMove2Pos',
+            create_goal_handler=create_goal_cb_exit_charger,
+            outcomes=[ABORT, CANCEL, SUCCEED],
+            result_handler=result_handler_cb_exit_charger
         ),
         transitions={
             SUCCEED: 'CHECK_TASK',
